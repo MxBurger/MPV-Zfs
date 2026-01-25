@@ -564,4 +564,1135 @@ Worker 1 terminating.
 
 ## Kommunikationsperformance
 
+Die Zeit für eine Nachrichtenübertragung lässt sich modellieren als:
 
+```math
+Übertragungszeit = Latenz + \frac{Nachrichtengröße}{Bandbreite}
+```
+
+### Latenz
+
+Ist die Startup-Zeit, unabhängig von der Nachrichtengröße (wie lange dauert es, überhaupt eine Verbindung aufzubauen?). Typische Werte sind 0.5 µs – 50 µs.
+
+### Bandbreite
+Ist die Datenübertragungsrate in Bytes pro Sekunde. Typische Werte sind 125 MB/s – 50 GB/s.
+
+### Wer dominiert?
+
+**Kleine Nachrichten:** Latenz dominiert
+- Die Zeit zum "Aufbauen" der Übertragung ist viel größer als die eigentliche Datenübertragung
+- Beispiel: 100 Bytes bei 50 µs Latenz → Latenz macht 99% der Zeit aus
+
+**Große Nachrichten:** Bandbreite dominiert
+- Die reine Datenübertragung braucht viel länger als der Startup
+- Beispiel: 1 GB bei 50 µs Latenz → Latenz ist vernachlässigbar
+
+### Kritische Nachrichtengröße
+
+Ab welcher Größe wird Bandbreite wichtiger als Latenz?
+
+```math
+Kritische Größe = Latenz \cdot Bandbreite
+```
+
+Beispielrechnungen:
+
+| Netzwerk | Bandbreite | Latenz | Kritische Größe |
+| --- | --- | --- | --- | --- |
+| Gigabit Ethernet | 125 MB/s (1 Gbps) | 50 µs | 6.25 kB |
+| InfiniBand NDR| 50 GB/s (400 Gbps) | 0.5 µs | 25 kB |
+
+Erklärung Gigabit Ethernet:
+- 125 MB/s × 50 µs = 125 × 10⁶ B/s × 50 × 10⁻⁶ s = 6250 Bytes ≈ 6.25 kB
+- Nachrichten unter 6.25 kB: Latenz ist der Flaschenhals
+- Nachrichten über 6.25 kB: Bandbreite wird zum Flaschenhals
+
+Erklärung InfiniBand:
+- Viel schneller (400 Gbps!) und viel niedrigere Latenz (0.5 µs)
+- Kritische Größe trotzdem bei 25 kB, weil beides proportional besser ist
+- InfiniBand wird in HPC-Clustern verwendet
+
+#### Maxls praktische Empfehlungen
+
+1. Viele kleine Nachrichten vermeiden
+ - Jede Nachricht kostet mindestens die Latenz
+ - Besser: Daten sammeln und in einer großen Nachricht senden
+2. Kommunikation und Berechnung überlappen
+ - Während auf eine Nachricht gewartet wird, kann man etwas anderes berechnen
+ - MPI bietet dafür nicht-blockierende Operationen (`MPI_Isend`, `MPI_Irecv`)
+3. Kollektive Operationen nutzen
+ - `MPI_Reduce` ist effizienter als viele einzelne `MPI_Send`/`MPI_Recv`
+ - MPI kann intern Baumstrukturen nutzen
+
+## Kollektive Kommunikation
+Kollektive Kommunikation bedeutet Kommunikation, an der alle Prozesse eines Kommunikators beteiligt sind – im Gegensatz zur Punkt-zu-Punkt-Kommunikation (wie `MPI_Send`/`MPI_Recv`), wo nur zwei Prozesse miteinander reden.
+
+Es gibt ein paar wichtige Eigenschaften:
+
+| Eigenschaft | Beschreibung |
+| --- | --- |
+| Alle Prozesse beteiligt | Jeder Prozess im Kommunikator muss die gleiche kollektive Funktion aufrufen |
+| Synchronisation | Alle müssen teilnehmen – wenn einer fehlt, blockieren alle anderen |
+| Blockierend | Die Standardvarianten warten, bis die Operation abgeschlossen ist | 
+| Keine Tags | Anders als bei `MPI_Send`/`MPI_Recv` gibt es keine Message-Tags | 
+| MPI optimiert intern | MPI wählt automatisch effiziente Algorithmen basierend auf der Hardware |
+
+Im wesentlichen punktet kollektive Kommunikation mit 2 Vorteilen.
+
+1. Einfacherer Code
+
+```cpp
+// Statt vieler Send/Recv-Aufrufe...
+if (rank == 0) {
+    for (int i = 1; i < size; i++) {
+        MPI_Send(data, n, MPI_INT, i, 0, MPI_COMM_WORLD);
+    }
+} else {
+    MPI_Recv(data, n, MPI_INT, 0, 0, MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+}
+
+// ...ein einziger Aufruf:
+MPI_Bcast(data, n, MPI_INT, 0, MPI_COMM_WORLD); // hell yeah
+```
+
+2. Bessere Performance
+MPI kennt die Netzwerktopologie und wählt optimale Algorithmen, ein Beispiel ist Baumbasierte Kommunikation statt sequentieller Schleifen. Außerdem kann MPI auch noch Hardware-spezifische Optimierungen (z.B. für InfiniBand) vornehmen.
+
+### Zwei Kategorien kollektiver Operationen
+
+**Kollektive Datenbewegung (Data Movement):**
+- `MPI_Bcast` – Einer sendet an alle
+- `MPI_Scatter` – Einer verteilt Teile an alle
+- `MPI_Gather` – Alle senden Teile an einen
+- `MPI_Allgather` – Alle sammeln von allen
+- `MPI_Alltoall` – Jeder sendet jedem etwas anderes
+
+**Kollektive Berechnung (Computation):**
+- `MPI_Reduce` – Alle Werte werden kombiniert (z.B. Summe), Ergebnis bei einem
+- `MPI_Allreduce` – Wie Reduce, aber Ergebnis bei allen
+- `MPI_Scan` – Präfixsumme (jeder bekommt Summe aller Vorgänger)
+
+#### Baumstrukturiertes Senden
+Sequentielles Senden ist ineffizient.
+
+Wenn Prozess 0 nacheinander an alle anderen sendet:
+```
+Prozess 0 → Prozess 1    (Zeit 1)
+Prozess 0 → Prozess 2    (Zeit 2)
+Prozess 0 → Prozess 3    (Zeit 3)
+...
+Prozess 0 → Prozess n-1  (Zeit n-1)
+```
+
+**Zeitkomplexität: O(n)** – Bei 1000 Prozessen braucht man 999 Schritte
+
+Eine Lösung: Baumbasierte Kommunikation, d.h. Prozesse, die schon Daten haben, helfen beim Weiterverteilen.
+
+```
+Zeit 1:  0 → 1                          (0 sendet an 1)
+Zeit 2:  0 → 2,  1 → 3                  (0 und 1 senden parallel)
+Zeit 3:  0 → 4,  1 → 5,  2 → 6,  3 → 7  (0, 1, 2, 3 senden parallel)
+```
+
+![alt text](img/mpi_tree_send.png)
+
+**Zeitkomplexität Baum: O(log n)** – Bei 1000 Prozessen nur 10 Schritte
+In jedem Schritt verdoppelt sich die Anzahl der Prozesse, die Daten haben. Nach $k$ Schritten haben $2^k$ Prozesse die Daten. Um $n$ Prozesse zu erreichen, braucht man $\lceil \log_2 n \rceil$ Schritte.
+
+>Das ist nur ein konzeptuelles Modell MPI-Implementierungen nutzen noch ausgefeiltere Algorithmen (Pipeline, Ring, etc.) je nach Nachrichtengröße und Hardware.
+
+#### Broadcast `MPI_Bcast`
+
+Ein Prozess ("Root") sendet dieselben Daten an alle anderen Prozesse.
+
+![alt text](img/mpi_bcast.png)
+
+```cpp
+int MPI_Bcast(
+    void* buffer,          // Pointer auf die Daten
+    int count,             // Anzahl der Elemente
+    MPI_Datatype datatype, // Datentyp (z.B. MPI_INT, MPI_DOUBLE)
+    int root,              // Rang des sendenden Prozesses
+    MPI_Comm comm          // Kommunikator
+);
+```
+
+Beim Aufruf muss man auf folgendes aufpassen:
+- **Alle rufen auf** - Jeder Prozess im Kommunikator muss `MPI_Bcast` aufrufen.
+- **Gleiche Parameter** - `count`, `datatype`, `root` und `comm` müssen bei allen identisch sein
+- **Buffer-Verwendung** - Bei Root: enthält die zu sendenden Daten. Bei anderen: wird mit empfangenen Daten gefüllt
+
+Beispiel-Verwendung
+```cpp
+int data[4];
+
+if (rank == 0) {
+    // Nur Prozess 0 initialisiert die Daten
+    data[0] = 10; data[1] = 20; data[2] = 30; data[3] = 40;
+}
+
+// ALLE Prozesse rufen Bcast auf – auch der Root!
+MPI_Bcast(data, 4, MPI_INT, 0, MPI_COMM_WORLD);
+
+// Jetzt haben alle Prozesse data = {10, 20, 30, 40}
+```
+
+Obacht, verlockender Fehler:
+```cpp
+if (rank == 0) {
+    MPI_Bcast(data, 4, MPI_INT, 0, MPI_COMM_WORLD);
+}
+```
+
+> Das ist falsch! Alle Prozesse müssen `MPI_Bcast` aufrufen, sonst warten die anderen ewig (Deadlock).
+
+#### Scatter `MPI_Scatter`
+
+Der Root verteilt unterschiedliche Datenteile an jeden Prozess. Unterschied zu Broadcast: Bei Broadcast bekommt jeder dieselben Daten. Bei Scatter bekommt jeder unterschiedliche Teile.
+
+![alt text](img/mpi_scatter.png)
+
+```cpp
+int MPI_Scatter(
+    void* sendbuf,           // Sendepuffer (nur beim Root relevant)
+    int sendcount,           // Anzahl Elemente PRO EMPFÄNGER
+    MPI_Datatype sendtype,   // Datentyp der Sendedaten
+    void* recvbuf,           // Empfangspuffer (bei jedem Prozess)
+    int recvcount,           // Anzahl Elemente zum Empfangen
+    MPI_Datatype recvtype,   // Datentyp der Empfangsdaten
+    int root,                // Rang des Senders
+    MPI_Comm comm            // Kommunikator
+);
+```
+
+Beim Aufruf muss man auf folgendes aufpassen:
+- `sendbuf` muss beim Root alle Daten enthalten und wird bei allen adneren ignoriert (kann `nullptr` sein)
+- `recvbuf` empfängt beim sowohl beim Root als auch bei allen anderen seinen Teil
+- `sendcount` ist die Anzahl der Elemente, die jeder einzelne Prozess bekommt – nicht die Gesamtzahl
+
+Beispiel-Verwendung
+```cpp
+int* sendbuf = nullptr;
+int recvbuf[3];  // Jeder Prozess empfängt 3 Elemente
+
+if (rank == 0) {
+    // Root hat alle Daten: 12 Elemente für 4 Prozesse
+    sendbuf = new int[12];
+    for (int i = 0; i < 12; i++) {
+        sendbuf[i] = i * 10;  // 0, 10, 20, 30, 40, ...
+    }
+}
+
+// Verteile: Jeder bekommt 3 Elemente
+MPI_Scatter(
+    sendbuf, 3, MPI_INT,    // Sende 3 Elemente pro Prozess
+    recvbuf, 3, MPI_INT,    // Empfange 3 Elemente
+    0, MPI_COMM_WORLD
+);
+
+// Ergebnis:
+// P0: recvbuf = {0, 10, 20}
+// P1: recvbuf = {30, 40, 50}
+// P2: recvbuf = {60, 70, 80}
+// P3: recvbuf = {90, 100, 110}
+```
+Die Daten werden **der Reihe nach** verteilt. Die ersten `sendcount` Elemente gehen an Prozess 0, die nächsten an Prozess 1, usw.
+
+Fancy:
+```
+┌───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┬───┐
+│ 0 │10 │20 │30 │40 │50 │60 │70 │80 │90 │100│110│
+└───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┴───┘
+ └────P0────┘└────P1────┘└────P2────┘└────P3────┘
+ ```
+
+#### Gather `MPI_Gather`
+Gather ist das Gegenteil von Scatter. Alle Prozesse senden ihre Daten an den Root, der sie einsammelt.
+
+![alt text](img/mpi_gather.png)
+
+```cpp
+int MPI_Gather(
+    void* sendbuf,           // Sendepuffer (bei jedem Prozess)
+    int sendcount,           // Anzahl Elemente zum Senden
+    MPI_Datatype sendtype,   // Datentyp der Sendedaten
+    void* recvbuf,           // Empfangspuffer (nur beim Root relevant)
+    int recvcount,           // Anzahl Elemente PRO SENDER
+    MPI_Datatype recvtype,   // Datentyp der Empfangsdaten
+    int root,                // Rang des Empfängers
+    MPI_Comm comm            // Kommunikator
+);
+```
+
+Beim Aufruf muss man auf folgendes aufpassen:
+- `sendbuf` - es wird auch der Teil von Root gesendet, sowie der von allen anderen
+- `recvbuf` - Muss im Root Platz für alle Daten haben, wird von allen anderen ignoriert
+- `recvcount` ist wieder die Anzahl pro Sender – nicht die Gesamtzahl
+
+Beispiel-Verwendung
+
+```cpp
+int sendbuf[3];  // Jeder Prozess hat 3 Elemente
+int* recvbuf = nullptr;
+
+// Jeder Prozess füllt seinen Sendepuffer
+for (int i = 0; i < 3; i++) {
+    sendbuf[i] = rank * 100 + i;
+}
+// P0: {0, 1, 2}
+// P1: {100, 101, 102}
+// P2: {200, 201, 202}
+// P3: {300, 301, 302}
+
+if (rank == 0) {
+    // Nur Root braucht Platz für alle Daten
+    recvbuf = new int[12];  // 4 Prozesse × 3 Elemente
+}
+
+MPI_Gather(
+    sendbuf, 3, MPI_INT,    // Jeder sendet 3 Elemente
+    recvbuf, 3, MPI_INT,    // Root empfängt 3 pro Prozess
+    0, MPI_COMM_WORLD
+);
+
+// Ergebnis bei P0: // shit so fancy, gawd help me
+// recvbuf = {0, 1, 2, 100, 101, 102, 200, 201, 202, 300, 301, 302}
+//           └──P0──┘  └────P1────┘  └────P2────┘  └────P3────┘ 
+```
+
+#### `MPI_Scatter` und `MPI_Gather` in Kombination
+
+Scatter und Gather werden oft zusammen verwendet.
+
+```cpp
+// 1. Root verteilt Arbeit
+MPI_Scatter(all_data, chunk_size, MPI_DOUBLE,
+            local_data, chunk_size, MPI_DOUBLE,
+            0, MPI_COMM_WORLD);
+
+// 2. Jeder Prozess bearbeitet seinen Teil
+process(local_data, local_result, chunk_size);
+
+// 3. Root sammelt Ergebnisse ein
+MPI_Gather(local_result, chunk_size, MPI_DOUBLE,
+           all_results, chunk_size, MPI_DOUBLE,
+           0, MPI_COMM_WORLD);
+```
+
+#### Allgather  `MPI_Allgather`
+Wie Gather, aber das Ergebnis landet bei ALLEN Prozessen, nicht nur beim Root.
+
+![alt text](img/mpi_allgather.png)
+
+Allgather = Gather + Broadcast (aber effizienter implementiert)
+
+```cpp
+int MPI_Allgather(
+    void* sendbuf,           // Sendepuffer
+    int sendcount,           // Anzahl Elemente zum Senden
+    MPI_Datatype sendtype,   // Datentyp der Sendedaten
+    void* recvbuf,           // Empfangspuffer (bei JEDEM Prozess!)
+    int recvcount,           // Anzahl Elemente pro Sender
+    MPI_Datatype recvtype,   // Datentyp der Empfangsdaten
+    MPI_Comm comm            // Kommunikator (kein Root-Rang)
+);
+```
+
+Es gibt drei wichtige Unterschiede zu `MPI_Gather`:
+- `MPI_Allgather` braucht keinen `root` Parameter
+- Bei `MPI_Allgather` brauchen alle einen `recvbuf`
+- Das Ergebnis wird mit allen geteilt
+
+Beispiel-Verwendung
+```cpp
+int sendbuf[2];
+int recvbuf[8];  // JEDER braucht Platz für alle Daten!
+
+// Jeder füllt seinen Teil
+sendbuf[0] = rank * 10;
+sendbuf[1] = rank * 10 + 1;
+// P0: {0, 1}, P1: {10, 11}, P2: {20, 21}, P3: {30, 31}
+
+MPI_Allgather(
+    sendbuf, 2, MPI_INT,
+    recvbuf, 2, MPI_INT,
+    MPI_COMM_WORLD          // Kein Root-Parameter
+);
+
+// Ergebnis bei ALLEN Prozessen:
+// recvbuf = {0, 1, 10, 11, 20, 21, 30, 31}
+```
+
+#### Vergleich der Operationen
+
+| Operation | Vorher | Nachher | Beschreibung |
+|-----------|--------|---------|--------------|
+| **Broadcast** | Root hat Daten | Alle haben **dieselben** Daten | Einer → Alle (gleich) |
+| **Scatter** | Root hat alle Daten | Jeder hat **seinen Teil** | Einer → Alle (unterschiedlich) |
+| **Gather** | Jeder hat seinen Teil | Root hat **alle** Daten | Alle → Einer |
+| **Allgather** | Jeder hat seinen Teil | Alle haben **alle** Daten | Alle → Alle |
+
+```
+Broadcast:     [ABCD] → [ABCD] [ABCD] [ABCD] [ABCD]
+
+Scatter:       [ABCD] → [A] [B] [C] [D]
+
+Gather:        [A] [B] [C] [D] → [ABCD]
+
+Allgather:     [A] [B] [C] [D] → [ABCD] [ABCD] [ABCD] [ABCD]
+```
+
+## Beispiel 2 Matrix-Vektor-Multiplikation
+
+Wir wollen berechnen:
+
+```math
+y = A \cdot x
+```
+
+Dabei ist:
+- $A$ eine Matrix mit $M$ Zeilen und $N$ Spalten (Größe $M \cdot N$)
+- $x$ ein Vektor mit $N$ Elementen
+- $y$ das Ergebnis, ein Vektor mit $M$ Elementen
+
+Berechnung eines einzelnen Elements:
+
+```math
+y_i =\sum_{j=1}^{N-1} A_{ij} \cdot x_j
+```
+Jedes Element $y_i$ ist das Skalarprodukt der $i$-ten Zeile von $A$ mit dem Vektor $x$.
+
+#### Parallelisierungsstrategie
+Jeder Prozess berechnet einen Teil der Ergebniszeilen.
+
+![alt text](img/mpi_matmult.png)
+
+Das Problem: Jeder braucht den gesamten Vektor $x$ - nicht nur einen Teil davon.
+
+Ein grober Ablauf kann so aussehen:
+
+| Schritt | Operation | MPI-Funktion |
+| --- | --- | --- |
+| 1 | Vektor $x$ an alle verteilen | `MPI_Bcast` |
+| 2 | Zeilen von Matrix  $A$ aufteilen | `MPI_Scatter` |
+| 3 | Jeder berechnet seinen Teil von $y$ | (lokal) |
+| 4 | Teilergebnisse bei Root sammeln | `MPI_Gather` |
+
+#### Grundstruktur
+
+```cpp
+int rank, comm_size;
+MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+MPI_Comm_size(MPI_COMM_WORLD, &comm_size);
+
+int M = 1000;  // Anzahl Zeilen der Matrix
+int N = 100;   // Anzahl Spalten der Matrix (= Länge von x)
+
+// Zufallszahlengenerator für Testdaten
+std::default_random_engine generator;
+std::uniform_real_distribution<double> distribution { -1.0, 1.0 };
+
+// 1. Broadcast: Vektor x an alle Prozesse verteilen
+// 2. Scatter: Zeilen der Matrix A verteilen
+// 3. Jeder Prozess berechnet seinen Teil des Ergebnisvektors y
+// 4. Gather: Teilergebnisse bei Root (Prozess 0) sammeln
+// 5. Root gibt das Ergebnis aus
+
+MPI_Finalize();`
+```
+
+Prozess 0 (Root) hält die komplette Matrix $A$ (nur am Anfang), kompletter Vektor $x$, komplettes Ergebnis $y$. Alle anderen halten nur ihren Teil von $A$, aber kompletten Vektor $x$ und nur ihren Teil von $y$.
+
+> **Annahme für dieses Beispiel: **  
+Wir nehmen an, dass $M$ (Anzahl der Zeilen) durch `comm_size` (Anzahl der Prozesse) teilbar ist. In der Praxis müsste man ungleiche Verteilungen mit `MPI_Scatterv` handhaben.
+
+#### Schritt 1 – Broadcast des Vektors $x$
+
+```cpp
+// Speicher für Vektor x allokieren (bei ALLEN Prozessen)
+double* x = new double[N];
+
+// Nur Prozess 0 initialisiert die Daten
+if (rank == 0) {
+    for (int i = 0; i < N; i++) {
+        x[i] = distribution(generator);  // Zufallswerte zwischen -1 und 1
+    }
+}
+
+// Vektor x an ALLE Prozesse verteilen
+MPI_Bcast(
+    x,                  // Puffer: bei Root die Quelldaten, bei anderen das Ziel
+    N,                  // Anzahl Elemente
+    MPI_DOUBLE,         // Datentyp
+    0,                  // Root = Prozess 0
+    MPI_COMM_WORLD      // Kommunikator
+);
+```
+Das führt zu
+```
+VORHER:                              NACHHER:
+┌─────────────────────┐              ┌─────────────────────┐
+│ P0: x = [0.3, -0.7, │              │ P0: x = [0.3, -0.7, │
+│         0.1, ...]   │              │         0.1, ...]   │
+├─────────────────────┤              ├─────────────────────┤
+│ P1: x = [?, ?, ...] │  ────────→   │ P1: x = [0.3, -0.7, │
+├─────────────────────┤   Bcast      │         0.1, ...]   │
+│ P2: x = [?, ?, ...] │              ├─────────────────────┤
+├─────────────────────┤              │ P2: x = [0.3, -0.7, │
+│ P3: x = [?, ?, ...] │              │         0.1, ...]   │
+└─────────────────────┘              ├─────────────────────┤
+                                     │ P3: x = [0.3, -0.7, │
+                                     │         0.1, ...]   │
+                                     └─────────────────────┘
+```
+
+Alle Prozesse allokieren Speicher für $x$ - nicht nur der Root. Ebenso rufen alle Prozesse `MPI_Bcast` auf - das ist eine kollektive Operation. Nach dem Broadcast hat nun jeder Prozess eine Kopie des kompletten Vektors.
+
+#### Schritt 2 - Scatter der Matrix-Zeilen
+skidibidip mndadap bo - I'm a scatman
+
+```cpp
+// Matrix A existiert nur beim Root
+double* A = nullptr;
+
+if (rank == 0) {
+    // Root allokiert und initialisiert die komplette Matrix
+    A = new double[M * N];  // M Zeilen × N Spalten
+    for (int i = 0; i < M * N; i++) {
+        A[i] = distribution(generator);
+    }
+}
+
+// Berechne, wie viele Zeilen jeder Prozess bekommt
+int rows_per_proc = M / comm_size;
+
+// Jeder Prozess allokiert Speicher für seinen Teil der Matrix
+double* local_A = new double[rows_per_proc * N];
+
+// Verteile die Zeilen der Matrix
+MPI_Scatter(
+    A,                          // Sendepuffer (nur bei Root relevant)
+    rows_per_proc * N,          // Anzahl Elemente PRO PROZESS
+    MPI_DOUBLE,                 // Datentyp
+    local_A,                    // Empfangspuffer
+    rows_per_proc * N,          // Anzahl zu empfangender Elemente
+    MPI_DOUBLE,                 // Datentyp
+    0,                          // Root
+    MPI_COMM_WORLD              // Kommunikator
+);
+
+// Root kann seinen Speicher für A freigeben
+if (rank == 0) {
+    delete[] A;
+}
+```
+
+Beispiel mit konkreten Zahlen:
+$M=1000$ Zeilen, $N=100$ Spalten, 4 Prozesse
+
+Jeder Prozess bekommt: $\frac{1000}{4} = 250$ Zeilen
+
+```
+Matrix A beim Root (1000 × 100 = 100.000 Elemente):
+┌─────────────────────────────────────┐
+│ Zeile 0:   a[0][0], a[0][1], ..., a[0][99]     │  ─┐
+│ Zeile 1:   a[1][0], a[1][1], ..., a[1][99]     │   │
+│ ...                                            │   ├── → P0 (25.000 Elemente)
+│ Zeile 249: a[249][0], ..., a[249][99]          │  ─┘
+├─────────────────────────────────────┤
+│ Zeile 250: a[250][0], ..., a[250][99]          │  ─┐
+│ ...                                            │   ├── → P1 (25.000 Elemente)
+│ Zeile 499: a[499][0], ..., a[499][99]          │  ─┘
+├─────────────────────────────────────┤
+│ Zeile 500: ...                                 │  ─┐
+│ ...                                            │   ├── → P2 (25.000 Elemente)
+│ Zeile 749: ...                                 │  ─┘
+├─────────────────────────────────────┤
+│ Zeile 750: ...                                 │  ─┐
+│ ...                                            │   ├── → P3 (25.000 Elemente)
+│ Zeile 999: ...                                 │  ─┘
+└─────────────────────────────────────┘
+```
+
+> In C/C++ werden Matrizen **zeilenweise** im Speicher abgelegt. Das ergibt dann folgendes Speicherlayout:
+```
+[a00, a01, ..., a0N, a10, a11, ..., a1N, a20, ...]
+ └─── Zeile 0 ───┘   └─── Zeile 1 ───┘  └── ...
+```
+Die Memory-Repräsentation in Zeilen ist geeignet für unseren Task.
+
+#### Schritt 3 - Lokale Berechnung
+
+```cpp
+// Jeder Prozess allokiert Speicher für seinen Teil des Ergebnisses
+double* local_y = new double[rows_per_proc];
+
+// Berechne: local_y = local_A × x
+for (int i = 0; i < rows_per_proc; i++) {
+    local_y[i] = 0.0;
+    
+    for (int j = 0; j < N; j++) {
+        // local_A ist ein 1D-Array, daher: Zeile i, Spalte j = Index i*N + j
+        local_y[i] += local_A[i * N + j] * x[j];
+    }
+}
+
+// Aufräumen: x und local_A werden nicht mehr gebraucht
+delete[] x;
+delete[] local_A;
+```
+
+**Prozess 0** berechnet $y_0, y_1, ..., y_{249}$
+**Prozess 1** berechnet $y_{250}, y_{251}, ..., y_{499}$
+**Prozess 2** berechnet $y_{500}, y_{501}, ..., y_{749}$
+**Prozess 3** berechnet $y_{750}, y_{751}, ..., y_{999}$
+
+Während diesem Schritt arbeiten **alle Prozesse gleichzeitig** an ihren Teilen – keine Kommunikation nötig.
+```
+Zeit →
+P0: [═══════ Berechne y[0..249] ═══════]
+P1: [═══════ Berechne y[250..499] ═════]
+P2: [═══════ Berechne y[500..749] ═════]
+P3: [═══════ Berechne y[750..999] ═════]
+     ↑                                  ↑
+     Alle starten                       Alle fertig
+     gleichzeitig                       (ungefähr)
+```
+
+#### Schritt 4 - Gather der Teilergebnisse
+
+```cpp
+// Ergebnisvektor y existiert nur beim Root
+double* y = nullptr;
+
+if (rank == 0) {
+    // Root allokiert Speicher für das komplette Ergebnis
+    y = new double[M];
+}
+
+// Sammle alle Teilergebnisse beim Root
+MPI_Gather(
+    local_y,            // Sendepuffer (jeder Prozess)
+    rows_per_proc,      // Anzahl Elemente pro Sender
+    MPI_DOUBLE,         // Datentyp
+    y,                  // Empfangspuffer (nur bei Root relevant)
+    rows_per_proc,      // Anzahl Elemente pro Sender (!)
+    MPI_DOUBLE,         // Datentyp
+    0,                  // Root
+    MPI_COMM_WORLD      // Kommunikator
+);
+
+// Lokales Ergebnis wird nicht mehr gebraucht
+delete[] local_y;
+```
+
+Die Daten werden in **Rang-Reihenfolge** zusammengesetzt: erst P0, dann P1, dann P2, dann P3.
+
+```
+VORHER:                              NACHHER:
+┌──────────────────┐                 ┌──────────────────┐
+│ P0: local_y =    │                 │ P0: y =          │
+│   [y0, y1, ...]  │                 │   [y0, y1, ...,  │
+├──────────────────┤                 │    y250, y251,...│
+│ P1: local_y =    │   ─────────→    │    y500, y501,...│
+│   [y250, y251,.. │     Gather      │    y750, y751,...│
+├──────────────────┤                 │    ..., y999]    │
+│ P2: local_y =    │                 ├──────────────────┤
+│   [y500, y501,.. │                 │ P1: (unchanged)  │
+├──────────────────┤                 ├──────────────────┤
+│ P3: local_y =    │                 │ P2: (unchanged)  │
+│   [y750, y751,.. │                 ├──────────────────┤
+└──────────────────┘                 │ P3: (unchanged)  │
+                                     └──────────────────┘
+```
+
+### Speicheraufbau beim Root nach Gather
+```
+y beim Root:
+┌─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┬─────┐
+│ y0  │ y1  │ ... │y249 │y250 │ ... │y499 │y500 │ ... │y999 │
+└─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┴─────┘
+ └────── von P0 ──────┘ └─── von P1 ───┘ └─P2─┘  └─P3─┘
+```
+
+#### Schritt 5 – Ausgabe des Ergebnisses
+
+```cpp
+if (rank == 0) { // nur root
+    std::cout << "Result vector y (first 10 elements):" << std::endl;
+
+    // Nur die ersten 10 Elemente ausgeben
+    for (int i = 0; i < std::min(10, M); i++) {
+        std::cout << y[i] << " ";
+    }
+
+    std::cout << std::endl;
+
+    // Speicher freigeben
+    delete[] y;
+}
+```
+
+Nur Prozess 0 hat das komplette Ergebnis. Die anderen Prozesse haben nach dem Gather ihre Teilergebnisse zwar noch in `local_y`, dieser Speicher ist aber bereits freigegeben.
+
+
+Eine vollständige Impl ist hier erstichtlich: [Matrixmultiplikation](Matmult.cpp)
+
+
+## Mehr Kollektive Kommunikation
+
+
+#### Alltoall (`MPI_Alltoall`)
+Jeder Prozess sendet unterschiedliche Daten an jeden anderen Prozess. Das ist wie eine "Transposition" der Daten über alle Prozesse hinweg.
+![alt text](img/mpi_alltoall.png)
+
+```cpp
+int MPI_Alltoall(
+    void* sendbuf,           // Sendepuffer
+    int sendcount,           // Anzahl Elemente PRO ZIEL-PROZESS
+    MPI_Datatype sendtype,   // Datentyp
+    void* recvbuf,           // Empfangspuffer
+    int recvcount,           // Anzahl Elemente PRO QUELL-PROZESS
+    MPI_Datatype recvtype,   // Datentyp
+    MPI_Comm comm            // Kommunikator
+);
+```
+
+Beim Aufruf muss man auf folgendes aufpassen:
+- `sendcount` ist die Anzahl der Elemente, die an jeden Prozess gesendet werden
+- `recvcount` ist die Anzahl der Elemente, die von jedem Prozess empfangen werden
+- Gesamtgröße `sendbuf` ist also `sendcount` x `comm_size`
+- Gesamtgröße `recvbuf` ist also `recvcount ` x `comm_size`
+
+Beispiel-Verwendung:
+
+```cpp
+int comm_size = 4;
+int sendbuf[4];  // Jeder hat 4 Elemente (1 für jeden Prozess)
+int recvbuf[4];  // Jeder empfängt 4 Elemente (1 von jedem Prozess)
+
+// Jeder Prozess initialisiert seine Daten
+// P0: sendbuf = {0, 1, 2, 3}
+// P1: sendbuf = {10, 11, 12, 13}
+// P2: sendbuf = {20, 21, 22, 23}
+// P3: sendbuf = {30, 31, 32, 33}
+for (int i = 0; i < comm_size; i++) {
+    sendbuf[i] = rank * 10 + i;
+}
+
+MPI_Alltoall(
+    sendbuf, 1, MPI_INT,    // Sende 1 Element pro Ziel
+    recvbuf, 1, MPI_INT,    // Empfange 1 Element pro Quelle
+    MPI_COMM_WORLD
+);
+
+// Ergebnis:
+// P0: recvbuf = {0, 10, 20, 30}  (Element 0 von jedem)
+// P1: recvbuf = {1, 11, 21, 31}  (Element 1 von jedem)
+// P2: recvbuf = {2, 12, 22, 32}  (Element 2 von jedem)
+// P3: recvbuf = {3, 13, 23, 33}  (Element 3 von jedem)
+```
+
+#### Reduce (`MPI_Reduce`)
+Kombiniert Daten von allen Prozessen mit einer Operation (z.B. Summe, Maximum) und speichert das Ergebnis beim Root.
+
+![alt text](img/mpi_reduce.png)
+
+```cpp
+int MPI_Reduce(
+    void* sendbuf,           // Sendepuffer (bei jedem Prozess)
+    void* recvbuf,           // Empfangspuffer (nur bei Root relevant)
+    int count,               // Anzahl Elemente
+    MPI_Datatype datatype,   // Datentyp
+    MPI_Op op,               // Reduktionsoperation
+    int root,                // Rang des Prozesses, der das Ergebnis bekommt
+    MPI_Comm comm            // Kommunikator
+);
+```
+
+Beispiel-Verwendung:
+
+```cpp
+double local_value = rank + 1.0;  // P0: 1.0, P1: 2.0, P2: 3.0, P3: 4.0
+double global_sum;
+
+MPI_Reduce(
+    &local_value,      // Jeder sendet seinen Wert
+    &global_sum,       // Nur Root empfängt das Ergebnis
+    1,                 // Ein Element
+    MPI_DOUBLE,
+    MPI_SUM,           // Summe bilden
+    0,                 // Root = Prozess 0
+    MPI_COMM_WORLD
+);
+
+if (rank == 0) {
+    std::cout << "Summe: " << global_sum << std::endl;  // Ausgabe: 10.0
+}
+```
+
+Man kann eigene Reduktionsoperationen definieren oder die von MPI bereitgestellten verwenden. (`MPI_SUM`, `MPI_PROD`, `MPI_MAX`, `MPI_MIN`, `MPI_LAND` = Logisches UND, `MPI_MAXLOC` = Maximum mit Postion, ...)
+
+## Beispiel 3 Good ol' Trapezregel again
+
+### Lösung 1 mit `MPI_Send` und `MPI_Recv`
+Die "alte" ineffiziente Implementierung sieht folgendermaßen aus.
+
+```cpp
+double local_integral = trap(local_a, local_b, local_n, h);
+
+if (rank != 0) {
+    // Alle außer Root: Senden ihr Ergebnis
+    MPI_Send(&local_integral, 1, MPI_DOUBLE, 0, 0, MPI_COMM_WORLD);
+
+} else /* rank == 0 */ {
+    // Root: Sammelt alle Ergebnisse sequentiell ein
+    double total_integral = local_integral;
+
+    for (int source = 1; source < comm_size; source++) {
+        double temp_integral;
+        MPI_Recv(&temp_integral, 1, MPI_DOUBLE, source, 0, 
+                 MPI_COMM_WORLD, MPI_STATUS_IGNORE);
+        total_integral += temp_integral;
+    }
+
+    std::cout << "Result: " << total_integral << std::endl;
+}
+```
+
+Die Implementierung ist nicht optimal, denn bei `comm_size - 1` Prozessen braucht man `comm_size - 1` Empfangsoperationen. Das sind bei 1000 Prozessen: 999 sequentielle Receives! Außerdem mehr Code und mehr Fehlerquellen, da man Send/Recv-Logik selbst schreiben muss und so leicht Deadlocks verursachen kann.
+
+### Lösung 2 mit `MPI_Reduce`
+`MPI_Reduce` vereinfacht den Sourcecode.
+
+```cpp
+double local_integral = trap(local_a, local_b, local_n, h);
+
+double total_integral;
+MPI_Reduce(
+    &local_integral,    // Jeder sendet sein lokales Ergebnis
+    &total_integral,    // Root empfängt die Summe
+    1,                  // Ein Element
+    MPI_DOUBLE,
+    MPI_SUM,            // Summe bilden
+    0,                  // Root = Prozess 0
+    MPI_COMM_WORLD
+);
+
+if (rank == 0) {
+    std::cout << "Result: " << total_integral << std::endl;
+}
+```
+Jetzt ist es nur ein Aufruf statt einer komplexen if-else-Struktur mit Schleifen und man erhält weitaus bessere Performance durch die Baumstruktur. Die Zeitkomplexität ist nun `O(log n)`, d.h. mit 1000 Prozessen: nur ~10 Schritte statt 999
+
+
+## Noch Mehr Kollektive Kommunikation
+
+### Allreduce (`MPI_Allreduce`)
+
+Wie Reduce, aber das Ergebnis landet bei ALLEN Prozessen, nicht nur beim Root.
+![alt text](img/mpi_allreduce.png)
+
+Allreduce = Reduce + Broadcast (aber effizienter implementiert!)
+
+```cpp
+int MPI_Allreduce(
+    void* sendbuf,           // Sendepuffer
+    void* recvbuf,           // Empfangspuffer (bei JEDEM Prozess)
+    int count,               // Anzahl Elemente
+    MPI_Datatype datatype,   // Datentyp
+    MPI_Op op,               // Reduktionsoperation
+    MPI_Comm comm            // Kommunikator (KEIN Root)
+);
+```
+
+Beim Aufruf muss man auf folgendes aufpassen:
+- Bei `MPI_Reduce` braucht man einen `root`-Parameter, bei `MPI_Allreduce` nicht
+- Bei `MPI_Reduce` braucht nur der `root` einen `recvbuf` bei `MPI_Allreduce` alle
+- Bei `MPI_Reduce` hält nur der `root` das Ergebnis, bei `MPI_Allreduce` alle
+
+Beispiel-Verwendung:
+
+```cpp
+double local_sum = 0.0;
+int local_count = 0;
+
+// Jeder Prozess berechnet lokale Statistiken
+for (int i = 0; i < local_n; i++) {
+    local_sum += local_data[i];
+    local_count++;
+}
+
+// Struktur für Summe und Anzahl
+double local_values[2] = {local_sum, (double)local_count};
+double global_values[2];
+
+// Alle Prozesse erhalten die globale Summe und Anzahl
+MPI_Allreduce(
+    local_values,
+    global_values,
+    2,              // Zwei Werte: Summe und Anzahl
+    MPI_DOUBLE,
+    MPI_SUM,
+    MPI_COMM_WORLD
+);
+
+// JEDER Prozess kann jetzt den Durchschnitt berechnen
+double global_average = global_values[0] / global_values[1];
+```
+
+#### Wann Allreduce statt Reduce?
+
+
+Reduce verwenden, wenn:
+- Nur ein Prozess das Ergebnis braucht
+- Das Ergebnis für die Ausgabe oder finale Verarbeitung gedacht ist
+
+Allreduce verwenden, wenn:
+- Alle Prozesse das Ergebnis für weitere Berechnungen brauchen
+- Iterative Algorithmen, wo jeder die globale Information benötigt
+
+Typische Anwendungsfälle für Allreduce:
+- Konvergenzprüfung in iterativen Verfahren (alle müssen wissen, ob fertig)
+- Normalisierung (alle brauchen den Gesamtwert)
+- Globale Statistiken für lokale Entscheidungen
+
+#### Wie implementiert MPI Allreduce effizient?
+
+Eine naive Implementierung wäre:
+```cpp
+MPI_Reduce(..., 0, ...);      // Erst Reduce zu Root
+MPI_Bcast(..., 0, ...);       // Dann Broadcast von Root
+```
+
+Das hätte Zeitkomplexität `O(log n) + O(log n) = O(log n)`, aber mit doppelter Kommunikation.
+
+Die Lösung: Butterfly-Algorithmus
+Er kombiniert Reduce und Broadcast in einem einzigen Durchlauf.
+
+![alt text](img/mpi_butterfly.png)
+
+### Scan (`MPI_Scan`) – Präfixsumme
+
+Jeder Prozess erhält die Reduktion aller Werte von Prozess 0 bis einschließlich sich selbst.
+
+![alt text](img/mpi_scan.png)
+
+Die Reihenfolge (Rang) ist hier entscheidend. Bei Reduce/Allreduce ist die Reihenfolge egal (weil kommutativ), bei Scan nicht.
+
+```cpp
+int MPI_Scan(
+    void* sendbuf,           // Sendepuffer
+    void* recvbuf,           // Empfangspuffer
+    int count,               // Anzahl Elemente
+    MPI_Datatype datatype,   // Datentyp
+    MPI_Op op,               // Reduktionsoperation
+    MPI_Comm comm            // Kommunikator
+);
+```
+
+Beispiel-Verwendung:
+
+```cpp
+int local_value = rank + 1;  // P0: 1, P1: 2, P2: 3, P3: 4
+int prefix_sum;
+
+MPI_Scan(
+    &local_value,
+    &prefix_sum,
+    1,
+    MPI_INT,
+    MPI_SUM,
+    MPI_COMM_WORLD
+);
+
+// Ergebnis:
+// P0: prefix_sum = 1         (nur eigener Wert)
+// P1: prefix_sum = 1+2 = 3
+// P2: prefix_sum = 1+2+3 = 6
+// P3: prefix_sum = 1+2+3+4 = 10
+```
+
+### Exklusiver Scan (`MPI_Exscan`)
+
+Es gibt auch MPI_Exscan, bei dem der eigene Wert nicht einbezogen wird.
+
+Beispiel-Verwendung:
+
+```cpp
+MPI_Exscan(&local_value, &prefix_sum, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+
+// Ergebnis:
+// P0: prefix_sum = undefiniert!  (kein Vorgänger)
+// P1: prefix_sum = 1             (nur P0)
+// P2: prefix_sum = 1+2 = 3       (P0 + P1)
+// P3: prefix_sum = 1+2+3 = 6     (P0 + P1 + P2)
+```
+
+Ein Beispiel mit konkretes Anwendungsbeispiel ist globale Indizierung.
+
+```cpp
+int local_count = anzahl_lokaler_elemente();
+
+int global_start_index;
+MPI_Exscan(&local_count, &global_start_index, 1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);
+
+if (rank == 0) {
+    global_start_index = 0;  // P0 startet bei 0
+}
+
+// Jetzt weiß jeder Prozess, ab welchem globalen Index seine Daten beginnen
+// Beispiel: P0 hat 100, P1 hat 150, P2 hat 80 Elemente
+// P0: start = 0
+// P1: start = 100
+// P2: start = 250
+```
+
+## In-Place Operationen
+
+Normalerweise braucht man zwei separate Puffer für kollektive Operationen:
+- `sendbuf` - die Eingabedaten
+- `recvbuf ` - das Ergebnis
+
+Bei In-Place Operationen wird derselbe Puffer für Ein- und Ausgabe verwendet. Man aktiviert In-Place in dem man `MPI_IN_PLACE`als Sendepuffer verwendet.
+
+Beispiel-Verwendung:
+
+```cpp
+// OHNE In-Place (zwei Puffer):
+double local_integral = trap(...);
+double total_integral;
+MPI_Allreduce(&local_integral, &total_integral, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+// Ergebnis in total_integral
+
+// MIT In-Place (ein Puffer):
+double local_integral = trap(...);
+MPI_Allreduce(MPI_IN_PLACE, &local_integral, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
+// Ergebnis direkt in local_integral
+```
+
+### Beispiel der good ol' Trapezregel
+
+```cpp
+double local = trap(local_a, local_b, local_n, h);
+
+MPI_Allreduce(
+    MPI_IN_PLACE,       // Kein separater Sendepuffer
+    &local,             // Dieser Puffer wird überschrieben
+    1, 
+    MPI_DOUBLE,
+    MPI_SUM,
+    MPI_COMM_WORLD
+);
+
+// Jetzt enthält 'local' bei ALLEN Prozessen die Gesamtsumme (jawoi)
+std::cout << "Prozess " << rank << ": Integral = " << local << std::endl;
+```
+
+Die Vorteile sind, das nur ein ein Puffer statt zwei nötig ist, einfacherer Code, da keine separate Variable für das Ergebnis und die Daten müssen nicht zwischen Puffern kopiert werden müssen.
+
+Bei manchen Operationen ist `MPI_IN_PLACE` nur im root erlaubt.
+
+```cpp
+// Nur beim ROOT ist MPI_IN_PLACE erlaubt!
+if (rank == 0) {
+    MPI_Reduce(MPI_IN_PLACE, &value, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+} else {
+    MPI_Reduce(&value, nullptr, 1, MPI_DOUBLE, MPI_SUM, 0, MPI_COMM_WORLD);
+}
+```
+
+## Noch weitere kollektive Operationen (fml)
+
+### Reduce-Scatter (`MPI_Reduce_scatter`)
+
+Kombiniert Reduce und Scatter in einer Operation.
+
+```cpp
+int MPI_Reduce_scatter(
+    void* sendbuf,
+    void* recvbuf,
+    int recvcounts[],    // Array: wie viele Elemente jeder Prozess bekommt
+    MPI_Datatype datatype,
+    MPI_Op op,
+    MPI_Comm comm
+);
+```
+1. Alle Elemente werden reduziert
+2. Das Ergebnis wird auf die Prozesse verteilt (wie Scatter)
+
+### Barrier (`MPI_Barrier`)
+Barrier ist ein Synchronisationspunkt - alle Prozesse warten, bis alle angekommen sind.
+
+```cpp
+// Alle Prozesse arbeiten
+do_some_work();
+
+// Warten, bis ALLE fertig sind
+MPI_Barrier(MPI_COMM_WORLD);
+
+// Erst jetzt geht's weiter
+do_next_phase();
+```
+
+Mit Barrier kann z.Bsp. realisieren:
+- Zeitmessungen (alle starten gleichzeitig)
+- Debugging (Ausgaben synchronisieren)
+- Phasenübergänge in Algorithmen
+
+aber keinesfalls:
+- Vor/nach kollektiven Operationen (die synchronisieren schon selbstständig)
+- Als "Sicherheit" überall einstreuen (kostet Performance)
+
+### Variable-Count Varianten (Scatterv, Gatherv, etc.)
+Die normalen Scatter/Gather erwarten, dass jeder Prozess gleich viele Elemente bekommt/sendet. Die `v`-Varianten erlauben unterschiedliche Anzahlen.
+
+```cpp
+int MPI_Scatterv(
+    void* sendbuf,
+    int sendcounts[],    // Array: wie viele Elemente an jeden Prozess
+    int displs[],        // Array: Offset im Sendepuffer für jeden Prozess
+    MPI_Datatype sendtype,
+    void* recvbuf,
+    int recvcount,       // Wie viele dieser Prozess empfängt
+    MPI_Datatype recvtype,
+    int root,
+    MPI_Comm comm
+);
+```
+Beispiel-Verwendung:
+```cpp
+// Problem: 10 Elemente auf 4 Prozesse verteilen
+// P0: 3, P1: 3, P2: 2, P3: 2
+
+int sendcounts[4] = {3, 3, 2, 2};
+int displs[4] = {0, 3, 6, 8};  // Startpositionen im Array
+
+// Beim Root: sendbuf = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+//                       └─P0──┘  └─P1──┘  └P2┘  └P3┘
+
+int recvcount = sendcounts[rank];  // Jeder weiß, wie viel er bekommt
+int* recvbuf = new int[recvcount];
+
+MPI_Scatterv(
+    sendbuf, sendcounts, displs, MPI_INT,
+    recvbuf, recvcount, MPI_INT,
+    0, MPI_COMM_WORLD
+);
+
+// Ergebnis:
+// P0: recvbuf = {0, 1, 2}
+// P1: recvbuf = {3, 4, 5}
+// P2: recvbuf = {6, 7}
+// P3: recvbuf = {8, 9}
+```
+
+
+#### Übersicht aller "v"-Varianten
+
+| Standard | Variable-Count |
+|----------|----------------|
+| `MPI_Scatter` | `MPI_Scatterv` |
+| `MPI_Gather` | `MPI_Gatherv` |
+| `MPI_Allgather` | `MPI_Allgatherv` |
+| `MPI_Alltoall` | `MPI_Alltoallv` |
