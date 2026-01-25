@@ -218,7 +218,7 @@ MPI_Isend() → kehrt sofort zurück
 MPI_Wait() ──┘ Wartet auf Abschluss
 ```
 
-Nicht-blockierende Operationen geben einen Request-Handle zurück – ein "Makerl", mit dem du später den Status abfragen kannst.
+Nicht-blockierende Operationen geben einen Request-Handle zurück - ein "Makerl", mit dem du später den Status abfragen kannst.
 
 ```cpp
 MPI_Request request;  // Das "Makerl"
@@ -344,7 +344,7 @@ Testen = **nicht blockierend**
 
 ## Abgeleitete Datentypen
 
-Hier geht es um abgeleitete Datentypen (Derived Datatypes) – ein mächtiges Werkzeug in MPI, um komplexere Datenstrukturen effizient zu übertragen.
+Hier geht es um abgeleitete Datentypen (Derived Datatypes) - ein mächtiges Werkzeug in MPI, um komplexere Datenstrukturen effizient zu übertragen.
 
 ### Eingebaute Datentypen
 
@@ -400,7 +400,7 @@ MPI erlaubt es, **eigene Datentypen zu definieren**, die beschreiben:
 - Wo sie im Speicher liegen (Abstände/Offsets)
 - Wie viele Elemente es gibt
 
-### Typemaps – Die Beschreibung abgeleiteter Typen
+### Typemaps - Die Beschreibung abgeleiteter Typen
 
 Eine **Typemap** ist eine Sequenz von Paaren, die einen abgeleiteten Typ vollständig beschreibt.
 
@@ -479,7 +479,7 @@ MPI_Type_free(&my_type);
 ```
 Ein Typ kann erst nach dem Commit verwendet werden
 
-#### Contiguous Type – Zusammenhängende Elemente
+#### Contiguous Type - Zusammenhängende Elemente
 
 ```cpp
 int MPI_Type_contiguous(
@@ -507,12 +507,12 @@ Speicher: [d0][d1][d2][d3][d4][d5][d6][d7][d8][d9]
            
            10 zusammenhängende MPI_DOUBLEs
 ```
-Auf den ersten Blick scheint `MPI_Type_contiguous` überflüssig – man könnte ja einfach `count=10` verwenden. Aber es ist nützlich:
+Auf den ersten Blick scheint `MPI_Type_contiguous` überflüssig - man könnte ja einfach `count=10` verwenden. Aber es ist nützlich:
 - **Klarerer Code:** Der Typ hat einen sprechenden Namen
 - **Kombinierbar:** Als Basis für komplexere Typen
 - **Wiederverwendbarkeit:** Einmal definieren, überall nutzen
 
-#### Vector Type – Regelmäßig verteilte Elemente
+#### Vector Type - Regelmäßig verteilte Elemente
 ```cpp
 int MPI_Type_vector(
     int count,              // Anzahl der Blöcke
@@ -522,7 +522,7 @@ int MPI_Type_vector(
     MPI_Datatype* newtype   // Neuer Typ (Ausgabe)
 );
 ```
-Erstellt einen Typ für **regelmäßig verteilte** Daten – Hey, perfekt für Zeilen/Spalten von Matrizen.
+Erstellt einen Typ für **regelmäßig verteilte** Daten - Hey, perfekt für Zeilen/Spalten von Matrizen.
 
 
 ```
@@ -576,7 +576,7 @@ MPI_Type_vector(5, 1, 2, MPI_INT, &send_type);
 MPI_Recv(buffer, 5, MPI_INT, source, tag, comm, &status);
 ```
 
-#### Vector Type Beispiel – X-Slice (eine Zeile)
+#### Vector Type Beispiel - X-Slice (eine Zeile)
 Im Grunde eine Wiederholung zu oben.
 
 ```
@@ -615,7 +615,7 @@ MPI_Type_vector(
 );
 ```
 
-#### Vector Type Beispiel – Y-Slice (eine Spalte) 
+#### Vector Type Beispiel - Y-Slice (eine Spalte) 
 
 ```
 Logische 2D-Ansicht:
@@ -716,3 +716,333 @@ double value = u[x][y];  // lesbarer
 
 ## Kommunikatoren und Topologien
 
+Hier geht es um Kommunikatoren und Topologien - Werkzeuge zur Organisation von Prozessen und deren Kommunikation.
+
+### Kommunikatoren 
+
+Ein Kommunikator ist eine Gruppe von Prozessen, die miteinander kommunizieren können. Er definiert den "Kontext" für alle MPI-Operationen.+
+
+**Gruppe (Group)**
+- Eine beschreibende Menge von Prozessen
+- Wird nicht direkt für Kommunikation verwendet
+- Definiert, welche Prozesse zusammengehören
+
+**Kommunikator (Communicator)**
+- Wird aus einer Gruppe abgeleitet
+- Wird für tatsächliche Kommunikation verwendet
+- Enthält zusätzliche Informationen (Kontext, Topologie, etc.)
+
+#### Der Standard-Kommunikator
+```cpp
+MPI_COMM_WORLD
+```
+ist der **Default-Kommunikator**, der automatisch alle Prozesse enthält, die beim Programmstart erzeugt wurden.
+Alle Prozesse können miteinander kommunizieren. Warum aber neue Kommunikatoren erstellen?
+
+1. **Teilmengen bilden:** Nur bestimmte Prozesse sollen kommunizieren
+2. **Kollektive Operationen einschränken:** Ein `MPI_Bcast` soll nicht alle Prozesse betreffen
+3. **Logische Trennung:** Manager vs. Worker, verschiedene Aufgabenbereiche
+4. **Topologien:** Prozesse in Grids, Ringen etc. anordnen
+
+| Funktion | Beschreibung |
+|----------|--------------|
+| `MPI_Comm_split` | Teilt einen Kommunikator nach Farbe/Schlüssel |
+| `MPI_Comm_create` | Erstellt Kommunikator aus einer Gruppe |
+| `MPI_Comm_dup` | Dupliziert einen Kommunikator |
+
+#### Beispiel - Worker-Kommunikator erstellen
+
+Typisches **Manager-Worker-Muster:**
+- Prozess 0 ist der **Manager** (koordiniert, verteilt Arbeit)
+- Prozesse 1 bis N-1 sind **Worker** (führen Berechnungen durch)
+
+Die Worker sollen untereinander kollektive Operationen ausführen können, **ohne den Manager einzubeziehen**.
+```
+Vorher (MPI_COMM_WORLD):
+┌─────────┬─────────┬─────────┬─────────┐
+│ Manager │ Worker  │ Worker  │ Worker  │
+│  (P0)   │  (P1)   │  (P2)   │  (P3)   │
+└─────────┴─────────┴─────────┴─────────┘
+
+Nachher (worker_comm):
+          ┌─────────┬─────────┬─────────┐
+          │ Worker  │ Worker  │ Worker  │
+          │  (P1)   │  (P2)   │  (P3)   │
+          └─────────┴─────────┴─────────┘
+```
+
+Jeder Kommunikator hat eine zugehörige Gruppe. Wir extrahieren diese, um sie zu modifizieren.
+```cpp
+// 1. Hole die Gruppe aus dem World-Kommunikator
+MPI_Group world_group;
+MPI_Comm_group(MPI_COMM_WORLD, &world_group);
+```
+`MPI_Group_excl` erstellt eine neue Gruppe, die alle Prozesse enthält außer den angegebenen.
+```cpp
+// 2. Erstelle eine neue Gruppe ohne den Manager (Rang 0)
+int ranks_to_exclude[] = { 0 };  // Manager ausschließen
+MPI_Group worker_group;
+MPI_Group_excl(world_group, 1, ranks_to_exclude, &worker_group);
+```
+`MPI_Comm_create` erzeugt einen neuen Kommunikator basierend auf der Gruppe.
+```cpp
+// 3. Erstelle den neuen Kommunikator aus der Worker-Gruppe
+MPI_Comm worker_comm;
+MPI_Comm_create(MPI_COMM_WORLD, worker_group, &worker_comm);
+```
+
+Was passiert beim Manager (Rang 0)?
+```cpp
+// Beim Manager ist worker_comm == MPI_COMM_NULL
+if (worker_comm != MPI_COMM_NULL) {
+    // Nur Worker führen diesen Code aus
+    MPI_Bcast(data, 100, MPI_DOUBLE, 0, worker_comm);
+}
+```
+
+Durch den neuen Kommunikator entstehen auch neue Ränge.
+| Prozess | Rang in `WORLD` | Rang in `worker_comm` |
+| --- | --- | --- |
+| Manager  | 0 | (nicht enthalten) |
+| Worker 1 | 1 | 0 |
+| Worker 2 | 2 | 1 |
+| Worker 3 | 3 | 2 |
+
+Worker können weiterhin mit dem Manager über `MPI_COMM_WORLD` kommunizieren
+
+```cpp
+if (rank == 0) {
+    // Manager sendet Arbeit an Worker
+    MPI_Send(work, size, MPI_INT, 1, tag, MPI_COMM_WORLD);
+} else {
+    // Worker empfängt vom Manager
+    MPI_Recv(work, size, MPI_INT, 0, tag, MPI_COMM_WORLD, &status);
+    
+    // Worker kommuniziert mit anderen Workern
+    MPI_Allreduce(local, global, 1, MPI_DOUBLE, MPI_SUM, worker_comm);
+}
+```
+
+#### Virtuelle Topologien
+Eine **virtuelle Topologie** definiert eine **logische Anordnung** von Prozessen. Sie beschreibt, wie Prozesse "benachbart" sind - unabhängig von der physischen Netzwerkstruktur.
+
+Beispiele für Topologien
+```
+Ring:                    2D-Grid:          
+                         
+P0 → P1 → P2 → P3        P0 ─ P1 ─ P2           
+↑              ↓         │    │    │            
+└───────←──────┘         P3 ─ P4 ─ P5           
+                         │    │    │            
+                         P6 ─ P7 ─ P8           
+```
+
+Topologien bringen Algorithmische Klarhei, viele Algorithmen haben natürliche Nachbarschaftsbeziehungen. MPI berechnet Nachbarn automatisch und kann Prozesse auf die Hardware-Topologie abbilden und so potentiell optimieren.
+
+Funktionen für Topologien
+| Funktion | Beschreibung |
+| --- | --- |
+| `MPI_Cart_create`  | Erstellt kartesische (Grid-)Topologie  |
+| `MPI_Graph_create`  | Erstellt beliebige Graph-Topologie  |
+| `MPI_Cart_shift`  | Berechnet Nachbarn in einer Richtung  |
+| `MPI_Cart_coords`  | Gibt Koordinaten eines Prozesses zurück  |
+| `MPI_Cart_rank`  |  Gibt Rang für gegebene Koordinaten zurück |
+
+#### Kartesische Topologie
+
+```cpp
+int MPI_Cart_create(
+    MPI_Comm comm_old,      // Ausgangs-Kommunikator
+    int ndims,              // Anzahl Dimensionen
+    const int dims[],       // Größe jeder Dimension
+    const int periods[],    // Periodisch (wrap-around) pro Dimension?
+    int reorder,            // Darf MPI Ränge umsortieren?
+    MPI_Comm *comm_cart     // Neuer kartesischer Kommunikator
+);
+```
+
+Mit konkreten Zahlen
+```cpp
+int dim_size[2] = {4, 3};   // 4 Zeilen, 3 Spalten
+int periods[2] = {0, 0};    // Kein Wrap-around
+MPI_Comm grid_comm;
+
+MPI_Cart_create(
+    MPI_COMM_WORLD,
+    2,              // 2D
+    dim_size,       // 4x3
+    periods,        // nicht periodisch
+    1,              // reorder = true (MPI darf optimieren)
+    &grid_comm
+);
+```
+
+Wichtige Parameter
+
+`dims[]` - Dimensionen
+```
+dims = {4, 3} bedeutet:
+
+     Spalte 0  Spalte 1  Spalte 2
+        ↓         ↓         ↓
+Zeile 0: P0 ───── P1 ───── P2
+         │        │        │
+Zeile 1: P3 ───── P4 ───── P5
+         │        │        │
+Zeile 2: P6 ───── P7 ───── P8
+         │        │        │
+Zeile 3: P9 ───── P10 ──── P11
+
+Insgesamt: 4 × 3 = 12 Prozesse
+```
+
+`periods[]` - Periodische Ränder
+
+```
+periods = {0, 0}: Keine Periodizität (offene Ränder)
+
+     P0 ─── P1 ─── P2          Ränder sind "Sackgassen"
+     │      │      │
+     P3 ─── P4 ─── P5
+     │      │      │
+     P6 ─── P7 ─── P8
+
+
+periods = {1, 1}: (Wrap-around in beiden Richtungen)
+
+   ┌─ P0 ─── P1 ─── P2 ─┐      P2 ist Nachbar von P0 (horizontal)
+   │  │      │      │   │      P6 ist Nachbar von P0 (vertikal)
+   │  P3 ─── P4 ─── P5  │
+   │  │      │      │   │
+   └─ P6 ─── P7 ─── P8 ─┘
+```
+
+`reorder = 1`, d.h. MPI darf die Ränge so zuweisen, dass die logische Topologie besser zur physischen Hardware passt. Das kann die Performance verbessern.
+
+#### Sendrecv im 2D-Grid
+
+Nachbarn finden mit `MPI_Cart_shift`
+```cpp
+int MPI_Cart_shift(
+    MPI_Comm comm,      // Kartesischer Kommunikator
+    int direction,      // Dimension (0, 1, 2, ...)
+    int displacement,   // Verschiebung (+1 = vorwärts, -1 = rückwärts)
+    int *source,        // Rang des Nachbarn in negativer Richtung
+    int *dest           // Rang des Nachbarn in positiver Richtung
+);
+```
+
+Beispiel: Horizontale Nachbarn (links/rechts)
+
+```cpp
+int left, right;
+MPI_Cart_shift(grid_comm, 1, 1, &left, &right);
+//                        │  │
+//                        │  └─ displacement = 1 (eine Position)
+//                        └──── direction = 1 (zweite Dimension = horizontal)
+
+// Sende nach rechts, empfange von links
+MPI_Sendrecv(
+    &send_data, 1, MPI_INT, right, 0,    // Senden
+    &recv_data, 1, MPI_INT, left, 0,     // Empfangen
+    grid_comm, MPI_STATUS_IGNORE
+);
+```
+```
+        left        aktueller      right
+          │         Prozess          │
+          ↓            ↓             ↓
+    ─── [P3] ◄══════ [P4] ═══════► [P5] ───
+         │     recv    │     send    │
+```
+
+Beispiel: Vertikale Nachbarn (oben/unten)
+
+```cpp
+int up, down;
+MPI_Cart_shift(grid_comm, 0, 1, &up, &down);
+//                        │
+//                        └──── direction = 0 (erste Dimension = vertikal)
+
+// Sende nach unten, empfange von oben
+MPI_Sendrecv(
+    &send_data, 1, MPI_INT, down, 0,
+    &recv_data, 1, MPI_INT, up, 0,
+    grid_comm, MPI_STATUS_IGNORE
+);
+```
+```
+           [P1]  ← up
+             ▲
+             │ recv
+             │
+           [P4]  ← aktueller Prozess
+             │
+             │ send
+             ▼
+           [P7]  ← down
+```
+
+Wenn ein Prozess keinen Nachbarn hat (bei nicht-periodischer Topologie), gibt `MPI_Cart_shift` den speziellen Wert `MPI_PROC_NULL` zurück.
+```cpp
+// Am linken Rand:
+MPI_Cart_shift(grid_comm, 1, 1, &left, &right);
+// left == MPI_PROC_NULL
+// right == gültiger Rang
+```
+
+#### Weitere nützliche Grid-Funktionen
+
+##### `MPI_Cart_coords` - liefert die Koordinaten eines Prozesses
+
+```cpp
+int coords[2];
+MPI_Cart_coords(grid_comm, rank, 2, coords);
+// coords[0] = Zeile
+// coords[1] = Spalte
+```
+Beispiel mit konkreten Zahlen
+
+```
+Rang 5 in einem 4×3 Grid:
+coords = {1, 2}  →  Zeile 1, Spalte 2
+
+     Spalte 0  Spalte 1  Spalte 2
+Zeile 0: P0       P1       P2
+Zeile 1: P3       P4      [P5] ← huhu hier
+Zeile 2: P6       P7       P8
+Zeile 3: P9       P10      P11
+```
+
+##### `MPI_Cart_rank` - Rang aus Koordinaten
+
+```cpp
+int coords[2] = {2, 1};  // Zeile 2, Spalte 1
+int rank;
+MPI_Cart_rank(grid_comm, coords, &rank);
+// rank == 7
+```
+
+##### `MPI_Cart_sub` - Unter-Kommunikatoren erstellen
+Erstellt Kommunikatoren für Teilmengen des Grids (z.B. alle Prozesse einer Zeile oder Spalte).
+
+```cpp
+// Kommunikator für jede Zeile
+int remain_dims[2] = {0, 1};  // 0 = diese Dim fixieren, 1 = diese Dim behalten
+MPI_Comm row_comm;
+MPI_Cart_sub(grid_comm, remain_dims, &row_comm);
+```
+
+```
+Originales Gitter:          Nach MPI_Cart_sub({0, 1}):
+                            (Jede Zeile wird ein eigener Kommunikator)
+P0 ─── P1 ─── P2            
+│      │      │             row_comm für Zeile 0: [P0 ─── P1 ─── P2]
+P3 ─── P4 ─── P5            row_comm für Zeile 1: [P3 ─── P4 ─── P5]
+│      │      │             row_comm für Zeile 2: [P6 ─── P7 ─── P8]
+P6 ─── P7 ─── P8
+```
+
+Das ist nützlich für: 
+- Kollektive Operationen nur innerhalb einer Zeile/Spalte
+- z.B. `MPI_Allreduce` über alle Prozesse einer Zeile
