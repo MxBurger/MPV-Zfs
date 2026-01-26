@@ -1034,7 +1034,7 @@ MPI_Cart_sub(grid_comm, remain_dims, &row_comm);
 ```
 
 ```
-Originales Gitter:          Nach MPI_Cart_sub({0, 1}):
+Originales Grid:          Nach MPI_Cart_sub({0, 1}):
                             (Jede Zeile wird ein eigener Kommunikator)
 P0 ─── P1 ─── P2            
 │      │      │             row_comm für Zeile 0: [P0 ─── P1 ─── P2]
@@ -1046,3 +1046,518 @@ P6 ─── P7 ─── P8
 Das ist nützlich für: 
 - Kollektive Operationen nur innerhalb einer Zeile/Spalte
 - z.B. `MPI_Allreduce` über alle Prozesse einer Zeile
+
+#### Theorie Beispiel - 2D-Stencil mit Halo-Austausch
+
+Wir haben ein **10×10 Grid** von Datenpunkten, das auf mehrere Prozesse verteilt werden soll.
+
+![alt text](img/mpi_empty_grid.png)
+
+Jeder Punkt enthält einen Wert (z.B. Temperatur)
+
+Die äußeren Punkte haben konstante Werte (z.B. bei der Wärmeleitung: feste Temperaturen am Rand).
+
+![alt text](img/mpi_grid_border.png)
+
+Jeder innere Punkt wird basierend auf seinen **4 Nachbarn** aktualisiert. Man spricht von einem 5-Punkte-Stencil.
+
+![alt text](img/mpi_5p_stencil.png)
+
+**Formel (z.B. für Wärmeleitung):**
+```
+neu[i,j] = 0.25 * (alt[i-1,j] + alt[i+1,j] + alt[i,j-1] + alt[i,j+1])
+```
+
+Der neue Wert ist der **Durchschnitt** der vier Nachbarn.
+
+
+##### Domain Decomposition - Aufteilung auf Prozesse
+
+Das Grid wird in **Teilgebiete** (Partitionen) aufgeteilt, die verschiedenen Prozessen zugewiesen werden.
+![alt text](img/mpi_grid_part.png)
+
+**Mögliche Aufteilungsstrategien:**
+- Nur horizontal (Streifen)
+- Nur vertikal (Streifen)
+- Beides (Blöcke) 
+
+##### Lokale Berechnung - Innere Punkte
+
+Für die **inneren Punkte** einer Partition sind alle Nachbarn lokal verfügbar.
+
+![alt text](img/mpi_grid_inner_p.png)
+
+Die inneren Punkte (weit weg von Partitionsgrenzen) können **ohne Kommunikation** berechnet werden. (Ez cheezy)
+
+##### Das Problem an den Partitionsgrenzen
+
+Punkte **an der Grenze** zur nächsten Partition brauchen Daten, die einem anderen Prozess gehören.
+
+![alt text](img/mpi_part_border.png)
+
+**Problem:** Der Stencil-Operator braucht den Wert von der gelben Partition, dieser liegt aber nicht im Speicher.
+
+##### Die Lösung - Halo-Regionen (Ghost Cells)
+
+Statt für jeden benötigten Nachbarpunkt einzeln zu kommunizieren, tauschen wir **ganze Randstreifen** aus - die sogenannten **Halo-** oder **Ghost-Regionen**.
+
+![alt text](img/mpi_halo_regions.png)
+
+Vorteile
+1. **Batch-Kommunikation:** Viele Werte in einem Send/Recv statt vieler einzelner
+2. **Einfache Berechnung:** Nach dem Halo-Austausch sind alle Nachbarn lokal verfügbar
+3. **Überlappung möglich:** Kommunikation kann mit Berechnung der inneren Punkte überlappt werden
+
+##### Halo-Austausch - Senden der eigenen Randwerte
+
+Jeder Prozess muss:
+1. Seine **eigenen Randwerte** an Nachbarn **senden**
+2. Die **Randwerte der Nachbarn** in sein Halo **empfangen**
+
+![alt text](img/mpi_halo_exchange.png)
+Nach dem Halo-Austausch hat jeder Prozess alle Daten, die er für die Stencil-Berechnung braucht.
+Jetzt kann der Stencil komplett lokal berechnet werden.
+
+
+### 2D-Stencil mit Halo-Austausch - Implementierung
+
+#### Kommunikationsmuster für den Halo-Austausch
+
+Für einen vollständigen Halo-Austausch im 2D-Grid brauchen wir **vier Kommunikationsschritte**:
+
+1. Sende nach "oben", empfange von "unten"
+2. Sende nach "unten", empfange von "oben"
+3. Sende nach "rechts", empfange von "links"
+4. Sende nach "links", empfange von "rechts"
+
+##### Punkt-zu-Punkt-Kommunikation
+
+Wir verwenden `MPI_Sendrecv` für jeden Austausch:
+
+```
+Prozess sendet Halo ──────► Nachbar
+Prozess empfängt Halo ◄──── Nachbar
+```
+
+Woher bekommen wir die Nachbarränge?
+1. **Kartesische Topologie erstellen** mit `MPI_Cart_create`
+2. **Nachbarn abfragen** mit `MPI_Cart_shift`
+
+#### Kartesischen Kommunikator erstellen
+
+```cpp
+// 1. MPI berechnet die optimale Gridgröße
+int dims[2] = {0, 0};  // 0 bedeutet: MPI soll entscheiden
+MPI_Dims_create(comm_size, 2, dims);
+// Bei 12 Prozessen könnte dims = {4, 3} oder {3, 4} sein
+```
+
+`MPI_Dims_create` verteilt `comm_size` Prozesse möglichst gleichmäßig auf ein 2D-Grid.
+
+```cpp
+// 2. Erstelle die kartesische Topologie
+int periods[2] = {0, 0};  // Keine periodischen Ränder
+MPI_Comm grid_comm;
+MPI_Cart_create(
+    MPI_COMM_WORLD,
+    2,              // 2 Dimensionen
+    dims,           // Größe jeder Dimension
+    periods,        // Periodizität
+    1,              // reorder = true (MPI darf Ränge optimieren)
+    &grid_comm
+);
+```
+
+- `periods = {0, 0}`: Kein Wrap-around an den Rändern
+  - Am Rand gibt es keine Nachbarn (wichtig für Randbedingungen)
+- `reorder = 1`: MPI darf die Prozesse umsortieren
+  - Ermöglicht bessere Zuordnung zur Hardware-Topologie
+  - Kann die Performance verbessern
+
+```cpp
+// 3. Hole den neuen Rang im Grid-Kommunikator
+MPI_Comm_rank(grid_comm, &rank_in_grid);
+```
+Nach `MPI_Cart_create` mit `reorder=1` kann sich der Rang ändern! Deshalb müssen wir den neuen Rang abfragen.
+
+#### Lokale Gridgröße für jeden Prozess berechnen
+Jeder Prozess muss wissen:
+- Welchen Teil des globalen Grids er bearbeitet
+- Die Koordinaten `(x0, y0)` bis `(x1, y1)` seines Teilgebiets
+
+```cpp
+// 1. Hole die eigenen Koordinaten im Prozessgrid
+int coords[2];
+MPI_Cart_coords(
+    grid_comm,  // Der kartesische Kommunikator
+    rank,       // Mein Rang
+    2,          // Anzahl Dimensionen
+    coords      // Ausgabe: meine Koordinaten
+);
+// coords[0] = meine Zeile im Prozessgrid
+// coords[1] = meine Spalte im Prozessgrid
+```
+
+**Beispiel:** Bei einem 4×3 Prozessgrid hat Rang 5:
+```
+     Spalte 0  Spalte 1  Spalte 2
+Zeile 0:  P0       P1       P2
+Zeile 1:  P3       P4      [P5] ← coords = {1, 2}
+Zeile 2:  P6       P7       P8
+Zeile 3:  P9       P10      P11
+```
+
+```cpp
+// 2. Berechne die lokale Gridgröße
+int local_nx = NX / dims[0];  // Spalten pro Prozess
+int local_ny = NY / dims[1];  // Zeilen pro Prozess
+
+// 3. Berechne die globalen Indizes meines Teilgebiets
+int x0 = coords[0] * local_nx;  // Startindex x
+int y0 = coords[1] * local_ny;  // Startindex y
+int x1 = x0 + local_nx;         // Endindex x (exklusiv)
+int y1 = y0 + local_ny;         // Endindex y (exklusiv)
+```
+
+```
+Globales Grid (NX=8, NY=6):        Aufteilung auf 2×2 Prozesse:
+
+┌─────────────────────────────┐      ┌──────────────┬──────────────┐
+│ 0,0  1,0  2,0  3,0  4,0 ... │      │     P0       │     P1       │
+│ 0,1  1,1  2,1  3,1  4,1 ... │      │  x: 0-3      │  x: 4-7      │
+│ 0,2  1,2  2,2  3,2  4,2 ... │      │  y: 0-2      │  y: 0-2      │
+│ 0,3  1,3  2,3  3,3  4,3 ... │      ├──────────────┼──────────────┤
+│ 0,4  1,4  2,4  3,4  4,4 ... │      │     P2       │     P3       │
+│ 0,5  1,5  2,5  3,5  4,5 ... │      │  x: 0-3      │  x: 4-7      │
+└─────────────────────────────┘      │  y: 3-5      │  y: 3-5      │
+                                     └──────────────┴──────────────┘
+
+Für P0: x0=0, y0=0, x1=4, y1=3
+        local_nx=4, local_ny=3
+```
+
+#### Nachbarränge ermitteln
+
+Für den Halo-Austausch braucht jeder Prozess die Ränge seiner vier Nachbarn:
+- `left` (links)
+- `right` (rechts)
+- `up` (oben)
+- `down` (unten)
+
+Die Anwendung von `MPI_Cart_shift`
+```cpp
+int left, right, up, down;
+
+// Horizontale Nachbarn (direction = 0)
+MPI_Cart_shift(
+    grid_comm,
+    0,              // direction: erste Dimension (x)
+    1,              // displacement: +1 = vorwärts
+    &left,          // Quelle bei negativer Verschiebung
+    &right          // Ziel bei positiver Verschiebung
+);
+
+// Vertikale Nachbarn (direction = 1)
+MPI_Cart_shift(
+    grid_comm,
+    1,              // direction: zweite Dimension (y)
+    1,              // displacement: +1 = vorwärts
+    &up,            // Quelle bei negativer Verschiebung
+    &down           // Ziel bei positiver Verschiebung
+);
+```
+Die Rückgabwerte bedeuten:
+```
+MPI_Cart_shift(comm, direction, 1, &source, &dest):
+
+source = Nachbar in negativer Richtung
+dest   = Nachbar in positiver Richtung
+```
+
+Wenn es keinen Nachbarn gibt (bei nicht-periodischer Topologie), wird `MPI_PROC_NULL` zurückgegeben.
+
+#### Lokales Grid um Halo-Regionen erweitern
+
+Bisher haben wir nur die Größe des **eigenen Datenbereichs** berechnet. Aber wir brauchen zusätzlichen Platz für die **Halo-Zellen** - die Kopien der Randwerte unserer Nachbarn. Prozesse am **Rand des globalen Grids** haben nicht in alle Richtungen Nachbarn, deswegen die Prüfung auf `MPI_PROC_NULL`
+
+```cpp
+// Erweitere das lokale Grid, wenn es einen Nachbarn gibt
+if (left != MPI_PROC_NULL)  x0 -= 1;  // Platz für linkes Halo
+if (right != MPI_PROC_NULL) x1 += 1;  // Platz für rechtes Halo
+if (up != MPI_PROC_NULL)    y0 -= 1;  // Platz für oberes Halo
+if (down != MPI_PROC_NULL)  y1 += 1;  // Platz für unteres Halo
+
+// Tatsächliche lokale Gridgrößen (mit Halo)
+local_nx = x1 - x0 + 1;
+local_ny = y1 - y0 + 1;
+```
+
+#### Speicher für das lokale Grid allokieren
+
+Wir wollen:
+1. **Zusammenhängenden Speicher** (für effiziente MPI-Kommunikation)
+2. **Bequemen 2D-Zugriff** mit `rows[x][y]`
+
+```cpp
+// 1. Array von Zeigern für Spalten-Zugriff
+double** rows = new double*[local_nx];
+
+// 2. Zusammenhängender Speicherblock für alle Daten
+rows[0] = new double[local_nx * local_ny];
+
+// 3. Setze die Zeiger auf die entsprechenden Positionen
+for (int i = 1; i < local_nx; i++) {
+    rows[i] = &rows[0][i * local_ny];
+}
+```
+
+Jetzt können wir bequem zugreifen:
+```cpp
+// Zugriff auf Element (x, y):
+double value = rows[x][y];
+
+// Das ist äquivalent zu:
+double value = rows[0][x * local_ny + y];
+```
+
+#### Datentypen für X- und Y-Halos erstellen
+
+Wir müssen **Zeilen** (x-Halos) und **Spalten** (y-Halos) übertragen. Diese haben unterschiedliche Speicherlayouts.
+
+```
+Speicherlayout (rows[x][y], y ist zusammenhängend):
+
+rows[0]: [0,0][0,1][0,2][0,3]    ← Spalte 0 (zusammenhängend)
+rows[1]: [1,0][1,1][1,2][1,3]    ← Spalte 1 (zusammenhängend)
+rows[2]: [2,0][2,1][2,2][2,3]    ← Spalte 2 (zusammenhängend)
+rows[3]: [3,0][3,1][3,2][3,3]    ← Spalte 3 (zusammenhängend)
+
+Eine Zeile (y=1): [0,1], [1,1], [2,1], [3,1] ← NICHT zusammenhängend :(
+```
+
+##### X-Halo (eine Zeile) - Gestridet
+
+```cpp
+MPI_Datatype x_halo_type;
+
+MPI_Type_vector(
+    local_nx,       // Anzahl der Elemente in der Zeile
+    1,              // Ein Element pro Block
+    local_ny,       // Stride: Abstand zum nächsten Element
+    MPI_DOUBLE,
+    &x_halo_type
+);
+```
+- Wir wollen `local_nx` Elemente
+- Jedes Element ist ein einzelner `double` (blocklength = 1)
+- Die Elemente liegen `local_ny` Positionen auseinander
+
+```
+Speicher: [0,0][0,1][0,2][0,3][1,0][1,1][1,2][1,3][2,0][2,1]...
+             ↑                 ↑                   ↑
+          Element 0         Element 1           Element 2
+          
+          ←--- local_ny=4 ---→ (stride)
+```
+
+##### Y-Halo (eine Spalte) - Zusammenhängend
+
+```cpp
+MPI_Datatype y_halo_type;
+
+MPI_Type_vector(
+    local_ny,       // Anzahl der Elemente in der Spalte
+    1,              // Ein Element pro Block
+    1,              // Stride = 1 (zusammenhängend!)
+    MPI_DOUBLE,
+    &y_halo_type
+);
+```
+
+- Wir wollen `local_ny` Elemente
+- Sie liegen direkt hintereinander (stride = 1)
+
+```
+Speicher: [0,0][0,1][0,2][0,3][1,0]...
+             ↑    ↑    ↑    ↑
+          Element 0,1,2,3 (zusammenhängend)
+```
+
+Da die Elemente zusammenhängend sind, könnte man auch `MPI_Type_contiguous` verwenden.
+
+```cpp
+MPI_Type_contiguous(local_ny, MPI_DOUBLE, &y_halo_type);
+```
+
+```cpp
+MPI_Type_commit(&x_halo_type);
+MPI_Type_commit(&y_halo_type);
+```
+
+##### Halo-Austausch - Ausgangszustand
+
+![alt text](img/mpi_halo_init.png)
+
+##### Halo-Austausch - Sende nach oben, empfange von unten
+
+![alt text](img/mpi_halo_it1.png)
+
+```cpp
+MPI_Sendrecv(
+    &rows[0][local_ny-2],    // Sendeadresse: vorletzte Zeile
+    1, x_halo_type,          // Sende 1 x-Halo (eine Zeile)
+    up,                      // Ziel: Nachbar oben
+    0,                       // Tag
+    &rows[0][0],             // Empfangsadresse: erste Zeile (Halo)
+    1, x_halo_type,          // Empfange 1 x-Halo
+    down,                    // Quelle: Nachbar unten
+    0,                       // Tag
+    grid_comm,
+    MPI_STATUS_IGNORE
+);
+```
+
+- `rows[0]` ist die erste Spalte
+- `[local_ny-2]` ist die **vorletzte** Zeile (die letzte eigene Datenzeile)
+- Die **letzte** Zeile `[local_ny-1]` ist das Halo (für Daten von unten)
+
+##### Halo-Austausch - Sende nach unten, empfange von oben
+
+![alt text](img/mpi_haloi_it2.png)
+
+```cpp
+MPI_Sendrecv(
+    &rows[0][1],             // Sendeadresse: zweite Zeile (erste eigene)
+    1, x_halo_type,
+    down,                    // Ziel: Nachbar unten
+    0,
+    &rows[0][local_ny-1],    // Empfangsadresse: letzte Zeile (Halo)
+    1, x_halo_type,
+    up,                      // Quelle: Nachbar oben
+    0,
+    grid_comm,
+    MPI_STATUS_IGNORE
+);
+```
+
+- Zeile `[0]` ist das Halo (für Daten von oben)
+- Zeile `[1]` ist die **erste eigene Datenzeile**
+
+##### Halo-Austausch - Sende nach rechts, empfange von links
+
+![alt text](img/mpi_halo_it2.png)
+
+```cpp
+MPI_Sendrecv(
+    &rows[local_nx-2][0],    // Sendeadresse: vorletzte Spalte
+    1, y_halo_type,          // Sende 1 y-Halo (eine Spalte)
+    right,                   // Ziel: Nachbar rechts
+    0,
+    &rows[0][0],             // Empfangsadresse: erste Spalte (Halo)
+    1, y_halo_type,
+    left,                    // Quelle: Nachbar links
+    0,
+    grid_comm,
+    MPI_STATUS_IGNORE
+);
+```
+
+##### Halo-Austausch - Sende nach links, empfange von rechts
+
+![alt text](img/mpi_halo_it3.png)
+
+```cpp
+MPI_Sendrecv(
+    &rows[1][0],             // Sendeadresse: zweite Spalte (erste eigene)
+    1, y_halo_type,
+    left,                    // Ziel: Nachbar links
+    0,
+    &rows[local_nx-1][0],    // Empfangsadresse: letzte Spalte (Halo)
+    1, y_halo_type,
+    right,                   // Quelle: Nachbar rechts
+    0,
+    grid_comm,
+    MPI_STATUS_IGNORE
+);
+```
+
+##### Halo-Austausch - Ergebnis
+
+![](img/mpi_halo_it5.png)
+
+Jetzt kann der Stencil-Operator lokal berechnet werden.
+
+```cpp
+// Stencil-Update (5-Punkte-Stencil)
+for (int x = 1; x < local_nx - 1; x++) {
+    for (int y = 1; y < local_ny - 1; y++) {
+        new_rows[x][y] = 0.25 * (
+            rows[x-1][y] +    // links
+            rows[x+1][y] +    // rechts
+            rows[x][y-1] +    // oben
+            rows[x][y+1]      // unten
+        );
+    }
+}
+```
+
+Alle Nachbarn sind lokal verfügbar - keine weitere Kommunikation nötig.
+
+#### Halo Zusammenfassung
+
+```cpp
+// 1. Sende nach oben, empfange von unten
+MPI_Sendrecv(
+    &rows[0][local_ny-2], 1, x_halo_type, up, 0,
+    &rows[0][0], 1, x_halo_type, down, 0,
+    grid_comm, MPI_STATUS_IGNORE);
+
+// 2. Sende nach unten, empfange von oben
+MPI_Sendrecv(
+    &rows[0][1], 1, x_halo_type, down, 0,
+    &rows[0][local_ny-1], 1, x_halo_type, up, 0,
+    grid_comm, MPI_STATUS_IGNORE);
+
+// 3. Sende nach rechts, empfange von links
+MPI_Sendrecv(
+    &rows[local_nx-2][0], 1, y_halo_type, right, 0,
+    &rows[0][0], 1, y_halo_type, left, 0,
+    grid_comm, MPI_STATUS_IGNORE);
+
+// 4. Sende nach links, empfange von rechts
+MPI_Sendrecv(
+    &rows[1][0], 1, y_halo_type, left, 0,
+    &rows[local_nx-1][0], 1, y_halo_type, right, 0,
+    grid_comm, MPI_STATUS_IGNORE);
+```
+
+| Richtung | Senden von | Empfangen in |
+|----------|------------|--------------|
+| Nach oben | `rows[0][local_ny-2]` (vorletzte Zeile) | `rows[0][0]` (erste Zeile) |
+| Nach unten | `rows[0][1]` (zweite Zeile) | `rows[0][local_ny-1]` (letzte Zeile) |
+| Nach rechts | `rows[local_nx-2][0]` (vorletzte Spalte) | `rows[0][0]` (erste Spalte) |
+| Nach links | `rows[1][0]` (zweite Spalte) | `rows[local_nx-1][0]` (letzte Spalte)  |
+
+##### Wie mit fehlenden Nachbarn umgehen?
+
+Am Rand des globalen Grids gibt es nicht in alle Richtungen Nachbarn.
+
+Wenn `MPI_Cart_shift` keinen Nachbarn findet, gibt es `MPI_PROC_NULL` zurück.
+
+- Senden an `MPI_PROC_NULL` hat **keine Wirkung** (kein Fehler, nice)
+- Empfangen von `MPI_PROC_NULL` hat **keine Wirkung** (kein Fehler, noice)
+
+```cpp
+// Dieser Code funktioniert auch am Rand
+MPI_Sendrecv(
+    &rows[0][local_ny-2], 1, x_halo_type,
+    up,    // Könnte MPI_PROC_NULL sein → kein Send
+    0,
+    &rows[0][0], 1, x_halo_type,
+    down,  // Könnte MPI_PROC_NULL sein → kein Recv
+    0,
+    grid_comm, MPI_STATUS_IGNORE
+);
+```
+
+Es ist keine spezielle Behandlung notwendig. Der gleiche Code funktioniert für alle Prozesse - egal ob sie am Rand sind oder nicht. Das macht den Code viel einfacher.
