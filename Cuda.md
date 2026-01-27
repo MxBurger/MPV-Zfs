@@ -1,4 +1,4 @@
-# CUDA: Massiv paralleles
+# CUDA: Massiv paralleles Rechnen macht Freude
 
 CUDA ermöglicht es, die enorme Rechenleistung moderner Grafikkarten für allgemeine Berechnungen zu nutzen - nicht nur für Grafik.
 
@@ -495,7 +495,7 @@ void vec_add_kernel(float* x, float* y, float* z, int N) {
 
 ![](img/cuda_compiler.png)
 
-Der nvcc-Compiler ist mehr als nur ein Compiler – er ist ein **Compiler-Treiber**, der:
+Der nvcc-Compiler ist mehr als nur ein Compiler - er ist ein **Compiler-Treiber**, der:
 1. Den Quellcode analysiert und aufteilt
 2. Verschiedene Compiler für verschiedene Teile aufruft
 3. Alles zusammenfügt
@@ -608,7 +608,7 @@ dim3 blockDim(4, 2, 2); // 4×2×2 = 16 Threads pro Block
 kernel<<<gridDim, blockDim>>>(...);
 ```
 
-### Beispiel – 2D Grid für Bildverarbeitung
+### Beispiel - 2D Grid für Bildverarbeitung
 
 ```cpp
 // Threads pro Block: 32 × 32 = 1024 (Maximum)
@@ -698,3 +698,573 @@ void mat_mul_kernel(float* A, float* B, float* C, unsigned int N) {
 ```
 
 Diese naive Version ist korrekt, aber ineffizient. 
+
+## Cuda Compute Architecture und Scheduling
+
+Eine GPU besteht aus mehreren **Streaming Multiprocessors (SMs)**. Jeder SM enthält:
+- Mehrere CUDA-Kerne (die eigentlichen Recheneinheiten)
+- Steuereinheiten (Control Units)
+- Verschiedene Speichertypen (Register, Shared Memory, Caches)
+
+Die genaue Anzahl der Komponenten variiert je nach GPU-Modell.
+
+![alt text](img/cuda_streaming_mp.png)
+
+### Thread-Block-Scheduling
+
+- Ein **Block** wird immer auf einem einzelnen SM ausgeführt (alle Threads des Blocks laufen auf demselben SM)
+- Threads benötigen Ressourcen (Register, Speicher, ...)
+- Daher kann ein SM nur eine begrenzte Anzahl von Threads und Blocks gleichzeitig verarbeiten
+- Übrige Blocks warten in einer Warteschlange
+
+**Kooperation innerhalb eines Blocks:**
+- Threads eines Blocks können über Barrieren synchronisieren (`__syncthreads()`)
+- Threads eines Blocks können über Shared Memory kommunizieren
+
+**Wichtige Einschränkungen:**
+- Es gibt keine Garantie, welcher SM einen Block wann bearbeitet
+- Kommunikation zwischen verschiedenen Blocks ist nicht möglich
+
+![alt text](img/cuda_thread_block_scheduling.png)
+
+
+### Transparente Skalierbarkeit
+Da Blocks auf beliebigen SMs ausgeführt werden können, ermöglicht dies **unterschiedliche Grade paralleler Ausführung** je nach Hardware-Fähigkeiten.
+
+**Beispiel:**
+- Ein Kernel mit 8 Blocks
+- Auf einer GPU mit 2 SMs: Blocks werden in 4 Wellen ausgeführt
+- Auf einer GPU mit 4 SMs: Blocks werden in 2 Wellen ausgeführt
+
+**Vorteil:** Derselbe Code läuft ohne Modifikation auf verschiedenen GPUs - daher "transparente" Skalierbarkeit.
+
+![alt text](img/cuda_transp_scale.png)
+
+### Thread-Scheduling (Warps)
+
+- Thread-Scheduling wird in Hardware implementiert (sehr effizient)
+- Threads werden in **Warps** gruppiert (typischerweise 32 Threads pro Warp)
+- Ein Warp ist die kleinste Scheduling-Einheit auf einem SM
+
+**Rechenbeispiel:**
+- 6 Blocks mit je 256 Threads
+- Warps pro Block: 256 / 32 = 8 Warps
+- Gesamtzahl: 6 × 8 = 48 Warps
+
+![alt text](img/cuda_thread_sched.png)
+
+### Warp-Ausführung
+
+
+Alle Threads in einem Warp werden im **SIMD-Verfahren** ausgeführt (Single Instruction Multiple Data):
+- Alle 32 Threads führen gleichzeitig dieselbe Instruktion aus
+- Nur die Daten sind unterschiedlich
+
+**Vorteile:**
+- Minimiert den Overhead für Steuerlogik
+- Eine Instruction-Fetch- und Decode-Einheit versorgt alle Threads eines Warps
+
+**Implementierung:**
+- Ein SM gruppiert seine Kerne in **Processing Blocks**
+- Alle Kerne eines Processing Blocks teilen sich die Instruktions-Fetch- und Decode-Einheiten
+- Threads desselben Warps werden demselben Processing Block zugewiesen
+
+![alt text](img/cuda_warp_execution.png)
+
+
+### Control Divergence
+
+**Problem:** Da alle Threads eines Warps dieselbe Instruktion ausführen, entstehen Probleme wenn verschiedene Threads unterschiedliche Ausführungspfade nehmen.
+
+Bei **Control Divergence**:
+- Der Warp durchläuft nacheinander jeden einzigartigen Ausführungspfad
+- Threads, die nicht auf dem aktuellen Pfad sind, werden deaktiviert (inaktiv)
+
+**Warp-Effizienz (SIMD-Effizienz):**  
+Der Prozentsatz der zu einem Zeitpunkt aktiven Threads/Kerne.
+
+→ Niedrige Warp-Effizienz führt zu schlechter Performance!
+
+**Ergänzende Erklärung:**  
+Im schlimmsten Fall (jeder Thread nimmt einen anderen Pfad) werden die 32 Threads nacheinander statt parallel ausgeführt - die GPU verhält sich dann wie ein Single-Thread-Prozessor. Dies ist einer der wichtigsten Unterschiede zur CPU-Programmierung, wo Branches "kostenlos" sind.
+
+#### Control Divergence - Beispiel Verzweigung
+
+```cpp
+if (threadIdx.x < 24) {
+    A  // Threads 0-23 aktiv, Threads 24-31 inaktiv
+} else {
+    B  // Threads 24-31 aktiv, Threads 0-23 inaktiv
+}
+C      // Alle Threads wieder aktiv
+```
+**Ablauf:**
+1. Erst führen Threads 0-23 den Code `A` aus (Threads 24-31 warten)
+2. Dann führen Threads 24-31 den Code `B` aus (Threads 0-23 warten)
+3. Danach führen alle Threads `C` aus
+
+![alt text](img/cuda_control_divergence_branch.png)
+
+#### Control Divergence - Beispiel Schleife
+
+```cpp
+N = a[threadIdx.x];
+for (i = 0; i < N; i++) {
+    A
+}
+```
+
+Wenn die Werte in `a[]` für verschiedene Threads unterschiedlich sind (z.B. 8, 6, 7, 4, 5, 6, 8, 7, ...), dann:
+- Der Warp führt so viele Iterationen aus wie das Maximum aller N-Werte
+- Threads, die früher fertig werden, sind in späteren Iterationen inaktiv
+
+![alt text](img/cuda_control_divergence.png)
+
+### Warp-Scheduling und Latency Tolerance
+
+**Beobachtung:** Normalerweise sind einem SM viel mehr Warps/Threads zugewiesen als gleichzeitig ausgeführt werden können.
+
+**Warum?**  
+Um lange Latenzzeiten zu "verstecken" (z.B. Speicherzugriffe).
+
+**Funktionsweise:**
+- Wenn ein Warp auf eine Operation mit langer Latenz wartet, kann der SM sofort zu einem anderen bereiten Warp wechseln
+- Der Hardware-Kontextwechsel ist **instant** (Zero-Overhead Thread Scheduling)
+
+Dies nennt man **Latency Tolerance** (u.a. auch Latency Hiding).
+
+**Ziel:** Die Ausführungseinheiten des SMs sollen zu jeder Zeit beschäftigt sein.
+
+**Voraussetzung:** Genügend Warps müssen verfügbar sein, um bei Wartezeiten wechseln zu können.
+
+![alt text](img/cuda_latency_tolerance.png)
+
+### Occupancy (Belegung)
+
+**Definition:**  
+Occupancy = Verhältnis von aktiven Warps/Threads auf einem SM zum Maximum
+
+**Ziel:** Occupancy maximieren, um Latency Hiding zu verbessern.
+
+**Occupancy hängt ab von:**
+- Anzahl Threads pro Block (zu wenige Threads = niedrige Occupancy)
+- Anzahl Blocks pro SM (zu wenige Blocks = weniger Scheduling-Möglichkeiten)
+
+**Hardware-Limits:**
+- Anzahl verwendeter Register pro Thread (mehr Register → weniger Threads möglich)
+- Menge des Shared Memory pro Block (mehr Shared Memory → weniger Blocks möglich)
+- Maximale Anzahl von Warps/Threads/Blocks pro SM
+
+Die tatsächlichen Hardware-Fähigkeiten variieren zwischen GPU-Modellen.
+
+> Occupancy ist ein Balanceakt: Man möchte viele Threads, aber jeder Thread benötigt Ressourcen. Wenn ein Kernel 64 Register pro Thread verwendet und der SM nur 64K Register hat, können maximal 1024 Threads gleichzeitig aktiv sein - selbst wenn das theoretische Maximum höher liegt.
+
+GPUs unterscheiden sich in vielen Aspekten (Anzahl SMs, Kerne pro SM, Speichergrößen, ...).
+
+Jede GPU hat eine spezifische **Compute Capability Version** (z.B. 7.0, 8.6, 9.0, 12.0), die ihre Features und Fähigkeiten angibt.
+
+```cpp
+cudaDeviceProp devProp;
+cudaGetDeviceProperties(&devProp, 0); // 0 = erste GPU
+int maxThreadsPerBlock = devProp.maxThreadsPerBlock;
+int maxThreadsPerSM = devProp.maxThreadsPerMultiProcessor;
+int maxBlocksPerSM = devProp.maxBlocksPerMultiProcessor;
+```
+
+#### Occupancy-Beispiel
+
+**Gegeben:** RTX 50xx GPU mit Compute Capability 12.0
+- Max Threads/Block: 1024
+- Max Threads/SM: 1536
+- Max Blocks/SM: 32
+
+**Frage:** Wie viele Threads/Block sollten wir wählen, um Occupancy zu maximieren?
+
+| Threads/Block | Blocks/SM | Aktive Threads/SM | Occupancy |
+|---------------|-----------|-------------------|-----------|
+| 100 |  `floor(1536/100) = 15` | 15 × 100 = 1500 | 97.6% |
+| 1024 | `floor(1536/1024) = 1` | 1 × 1024 = 1024 | 66.7% |
+| 32 |   `floor(1536/32) = 48` → **begrenzt auf 32** | 32 × 32 = 1024 | 66.7% |
+| 256 |  `floor(1536/256) = 6` | 6 × 256 = 1536 | **100%** |
+| 128 |  `floor(1536/128) = 12` | 12 × 128 = 1536 | **100%** |
+| 512 |  `floor(1536/512) = 3` | 3 × 512 = 1536 | **100%** |
+
+**Berechnung erklärt:**
+- Bei 32 Threads/Block würden mathematisch 48 Blocks passen, aber das Maximum ist 32 Blocks/SM
+- Bei 256, 128 oder 512 Threads/Block erreichen wir exakt das Maximum von 1536 Threads
+
+**Wichtig:** Occupancy ist nicht der einzige Performance-Faktor.
+
+**Chatty sagt:**  
+Hohe Occupancy garantiert keine hohe Performance. Andere Faktoren wie Memory Coalescing, Control Divergence, und Arithmetic Intensity spielen ebenfalls eine große Rolle. Es kann sogar sein, dass niedrigere Occupancy zu besserer Performance führt, wenn dadurch mehr Register pro Thread verfügbar sind und Spilling in den langsamen globalen Speicher vermieden wird.
+
+## Speicherarchitektur und Datenlokalität
+
+### Performance-Engpässe: Speicher vs. Compute Power
+
+Speicheroperationen (Laden/Speichern) sind auf der GPU **viel langsamer** als arithmetische Operationen.
+
+**Typische Latenzen:**
+- Globaler Speicherzugriff: ~400-600 Taktzyklen
+- Gleitkomma-Addition: ~10 Taktzyklen
+→ **Speicherbandbreite und -latenz** sind oft die Hauptengpässe in GPU-Anwendungen.
+
+### Performance-Grenzen (Compute-Bound vs. Memory-Bound)
+
+Eine Anwendung kann sein:
+- **Compute-bound:** Performance wird durch Rechenleistung (FLOPS) begrenzt
+- **Memory-bound:** Performance wird durch Speicherbandbreite begrenzt
+
+**Arithmetic Intensity (auch gennant Computational Intensity):**  
+Das Verhältnis von Rechenoperationen zu Speicherzugriffen (FLOPS/Bytes) ist die entscheidende Metrik.
+
+**Berechnung der Untergrenze:**  
+Um nicht memory-bound zu sein, muss gelten:
+```
+Benötigtes Verhältnis (OP/Byte) = Peak FLOPS / Peak Bandbreite (Bytes/s)
+```
+
+| GPU | Peak F32 (TFlops) | Peak Bandbreite (GB/s) | Benötigtes Verhältnis (OP/Byte) |
+|-----|-------------------|------------------------|--------------------------------|
+| RTX 3080 | 29.77 | 760.3 | 39 |
+| RTX 4080 | 48.74 | 716.8 | 68 |
+| H100 | 67 | 3,350 | 20 |
+| RTX 5080 | 56.28 | 960 | 59 |
+
+**Chatty meint:**
+Diese Zahlen bedeuten: Auf einer RTX 4080 müssen pro geladenem Byte mindestens 68 Rechenoperationen durchgeführt werden, um die volle Rechenleistung auszunutzen. Das ist eine sehr hohe Anforderung! Die H100 ist hier "gutmütiger" wegen ihrer enormen Speicherbandbreite.
+
+#### Beispiel: Vektoraddition
+
+```cpp
+__global__ void add_vectors(float* a, float* b, float* c, int N) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    if (i < N) {
+        c[i] = a[i] + b[i];
+    }
+}
+```
+
+- 1 Fließkomma-Addition (der Vergleich wird ignoriert)
+- 2 Speicher-Lesezugriffe (`a[i]`, `b[i]`) + 1 Speicher-Schreibzugriff (`c[i]`)
+- Jeder float = 4 Bytes → 3 × 4 = 12 Bytes Speicherverkehr
+
+**Arithmetic Intensity:**
+```
+1 FLOP / 12 Bytes = 0.0833 OP/Byte
+```
+
+**Fazit:** Vektoraddition ist auf **allen modernen GPUs memory-bound**.
+
+→ Hier kann man nichts optimieren - das Problem hat inhärent zu wenig Rechenaufwand pro Datenmenge.
+
+#### Beispiel: Matrixmultiplikation
+
+```cpp
+__global__ void matrix_multiplication(
+    float* A, float* B, float* C, int N)
+{
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+
+    if (row < N && col < N) {
+        float sum = 0.0f;
+        for (int k = 0; k < N; k++) {
+            sum += A[row * N + k] * B[k * N + col];
+        }
+        C[row * N + col] = sum;
+    }
+}
+```
+
+![alt text](img/cuda_mat_mult.png)
+
+- Jeder Thread berechnet ein Element von `C`
+- Dafür wird eine komplette Zeile von `A` und eine komplette Spalte von `B` benötigt
+- Innere Schleife: `N` Multiplikationen und `N` Additionen
+
+##### Matrixmultiplikation - Bottleneck-Analyse
+
+**Naive Betrachtung (pro Schleifeniteratation):**
+- 1 Addition + 1 Multiplikation = 2 FLOPS
+- 2 Speicher-Lesezugriffe (A und B) = 8 Bytes
+- → 2 FLOPS / 8 Bytes = **0.25 OP/Byte** → memory-bound
+
+Man kann Datenwiederverwendung verbessern.
+
+**Theoretische Betrachtung (für NxN-Matrizen):**
+- Gesamte Datenmenge: 2 Matrizen × N² × 4 Bytes = 8N² Bytes
+- Gesamte Operationen: N² Elemente × (N Additionen + N Multiplikationen) = 2N³ FLOPS
+- **Theoretische arithmetic Intensity:** 2N³ / 8N² = **N/4 OP/Byte**
+
+Das ist der entscheidende Unterschied zur Vektoraddition: Bei der Matrixmultiplikation wächst das Verhältnis von Rechenaufwand zu Datenmenge mit `N`.
+
+- **Links:** Jedes Element von `A` wird `N`-mal verwendet - für die Berechnung einer kompletten Zeile von `C`. 
+- **Rechts:** Jedes Element von B wird N-mal verwendet - für die Berechnung einer kompletten Spalte von C.
+
+![alt text](img/cuda_mat_mult_data_use.png)
+
+Wenn man es schafft, jedes Element nur einmal aus dem globalen Speicher zu laden und dann N-mal aus einem schnelleren Speicher (z.B. Shared Memory) zu lesen, kann man die Speicherbandbreite um den Faktor N reduzieren. Das ist die Grundidee des **Tiling** (noice).
+
+
+### Speicherarchitektur einer GPU
+![alt text](img/cuda_memory_arc.png)
+
+Die Latenzunterschiede sind groß: Register sind ~500× schneller als globaler Speicher. Das erklärt, warum die Nutzung von Shared Memory so wichtig ist - es ist fast so schnell wie Register, aber für alle Threads eines Blocks gemeinsam zugänglich.
+
+### Speicherhierarchie in CUDA
+
+![alt text](img/cuda_mem_hierac.png)
+
+**Sichtbarkeit:**
+- **Register:** Nur für den einzelnen Thread sichtbar
+- **Shared Memory:** Für alle Threads eines Blocks sichtbar
+- **Global/Constant Memory:** Für alle Threads aller Blocks sichtbar
+- **Host Memory:** Muss explizit zur GPU transferiert werden
+
+Diese Hierarchie bestimmt, wie Threads kommunizieren können:
+- Innerhalb eines Threads: über Register (am schnellsten)
+- Innerhalb eines Blocks: über Shared Memory (schnell, benötigt Synchronisation)
+- Zwischen Blocks: nur über Global Memory (langsam, keine direkte Synchronisation möglich)
+
+### CUDA Speicher-Deklarations-Qualifier
+
+| Deklaration | Speichertyp | Sichtbarkeit | Lebensdauer | Zugriffsgeschwindigkeit |
+|-------------|-------------|--------------|-------------|------------------------|
+| `int localVar;` | Register | Thread | Thread | Am schnellsten |
+| `int localArray[N];` | Global Memory* | Thread | Thread | Langsam |
+| `__device__ int globalVar;` | Global Memory | Grid | Anwendung | Langsam |
+| `__device__ __shared__ int sharedVar;` | Shared Memory | Block | Block | Schnell |
+| `__device__ __constant__ int constVar;` | Constant Memory | Grid | Anwendung | Schnell (gecacht) |
+
+```cpp
+__global__ void example_kernel() {
+    // Register - schnellster Zugriff, nur für diesen Thread
+    int localVar = 5;
+    float temp = 3.14f;
+    
+    // Lokales Array - kann in Global Memory landen wenn zu groß (heißt dann Local Memory)
+    int localArray[10];  // Vorsicht bei großen Arrays
+    
+    // Shared Memory - für alle Threads im Block sichtbar
+    __shared__ float sharedData[256];
+    
+    // Zugriff auf globale/konstante Variablen (außerhalb definiert)
+    // globalVar, constVar
+}
+
+// Globale Variable - existiert für die gesamte Anwendung
+__device__ int globalCounter;
+
+// Konstante Variable - schnell lesbar, nicht schreibbar vom Device
+__constant__ float constMatrix[16];
+```
+
+## Tiling und Optimierungsstrategien
+
+### Datenwiederverwendung bei der Matrixmultiplikation
+
+Einige Threads im selben Block verwenden dieselben Eingabedaten.
+
+**Grundidee des Tilings:**
+1. Lade Daten, die von mehreren Threads verwendet werden, in den Shared Memory
+2. Threads lesen Daten aus dem Shared Memory statt aus dem Global Memory
+
+![alt text](img/cuda_mat_mul_til1.png)
+
+- Alle Threads, die Elemente in derselben Zeile von C berechnen, brauchen dieselbe Zeile von A
+- Alle Threads, die Elemente in derselben Spalte von C berechnen, brauchen dieselbe Spalte von B
+
+#### Tiled Matrixmultiplikation
+
+**Schritt 1:** Lade das erste Tile jeder Eingabematrix in den Shared Memory.
+Jeder Thread lädt genau ein Element. Das nutzt die Parallelität optimal aus.
+
+![alt text](img/cuda_mat_mul_til2.png)
+
+**Schritt 2:** Jeder Thread berechnet seine partielle Summe aus dem Tile im Shared Memory.
+
+![alt text](img/cuda_mat_mul_til3.png)
+
+Jeder Thread berechnet hier nur einen Teil des finalen Ergebnisses - nämlich den Beitrag dieses einen Tiles. Die Schleife iteriert über die Tile-Breite (z.B. 16), nicht über die gesamte Matrixbreite N. Das ist viel schneller, weil alle Zugriffe auf Shared Memory gehen.
+
+**Nach Schritt 2:** Synchronisation
+Warte, bis alle Threads Schritt 2 abgeschlossen haben.
+![alt text](img/cuda_mat_mul_til4.png)
+
+
+#### Tiled Matrixmultiplikation - Iteration
+Wiederhole Schritte 1 und 2 für das nächste Tile.
+
+
+1. Lade Tile 0 von A und B → berechne partiellen Beitrag → synchronisiere
+2. Lade Tile 1 von A und B → berechne partiellen Beitrag → synchronisiere
+3. ... (N/T Iterationen)
+4. Schreibe finale Summe nach C
+
+![alt text](img/cuda_mat_mul_til4.png)
+
+![alt text](img/cuda_mat_mul_til5.png)
+
+![alt text](img/cuda_mat_mul_til6.png)
+
+```cpp
+constexpr int N = 1024, T = 16;  // Matrixgröße und Tile-Größe
+
+__global__ void tiled_matmul(const float* A, const float* B, float* C) {
+    // Shared Memory für die Tiles
+    __shared__ float A_s[T][T];
+    __shared__ float B_s[T][T];
+    
+    // Globale Position dieses Threads im Ergebnis
+    int row = blockIdx.y * blockDim.y + threadIdx.y;
+    int col = blockIdx.x * blockDim.x + threadIdx.x;
+    
+    float sum = 0.0f;
+
+    // Iteriere über alle Tiles
+    for (int tile = 0; tile < N / T; tile++) {  // tile = Phase
+        
+        // 1. Lade Tile in Shared Memory
+        //    Jeder Thread lädt ein Element von A und ein Element von B
+        A_s[threadIdx.y][threadIdx.x] = A[row * N + tile * T + threadIdx.x];
+        B_s[threadIdx.y][threadIdx.x] = B[(tile * T + threadIdx.y) * N + col];
+        
+        __syncthreads();  // Warte bis alle geladen haben
+
+        // 2. Berechne partiellen Beitrag aus diesem Tile
+        for (int i = 0; i < T; i++) {
+            sum += A_s[threadIdx.y][i] * B_s[i][threadIdx.x];
+        }
+        
+        __syncthreads();  // Warte bis alle berechnet haben
+    }
+
+    // Schreibe Ergebnis
+    C[row * N + col] = sum;
+}
+```
+
+**Chatty sagt:**
+
+**Laden von A:**
+```cuda
+A_s[threadIdx.y][threadIdx.x] = A[row * N + tile * T + threadIdx.x];
+```
+- `row * N`: Springe zur richtigen Zeile
+- `tile * T`: Verschiebung zum aktuellen Tile
+- `threadIdx.x`: Position innerhalb des Tiles
+
+**Laden von B:**
+```cuda
+B_s[threadIdx.y][threadIdx.x] = B[(tile * T + threadIdx.y) * N + col];
+```
+- `tile * T + threadIdx.y`: Zeile innerhalb des Tiles
+- `* N`: Zeilenlänge
+- `col`: Spalte bleibt konstant für alle Tiles
+
+**Ergänzende Erklärung:**  
+Ein häufiger Fehler ist, die Indizes für A und B zu verwechseln:
+- Für A läuft das Tile horizontal (entlang der Zeile)
+- Für B läuft das Tile vertikal (entlang der Spalte)
+
+Daher ist die Indexierung unterschiedlich, obwohl beide Male ein TxT Tile geladen wird.
+
+### Arithmetic Intensity für Tiled Matrixmultiplikation
+
+**(für NxN Matrizen mit TxT Tiles)**
+
+**Global Memory Traffic pro Block (Bytes):**
+- Jede Iteration: T×T Elemente von A + T×T Elemente von B
+- Elemente sind 4 Bytes (float)
+- Anzahl Iterationen: N / T
+- **Bytes pro Block = 2 × T² × 4 × (N/T) = 8NT Bytes**
+
+**FLOPS pro Block:**
+- Jedes der T² Elemente berechnet ein Skalarprodukt der Länge N
+- Das sind N Multiplikationen + N Additionen pro Element
+- **FLOPS pro Block = T² × 2N = 2NT² FLOPS**
+
+**Arithmetische Intensität pro Block:**
+```
+(2NT² FLOPS) / (8NT Bytes) = T/4 OP/Byte
+```
+
+Die Tile-Größe T erhöht die Arithmetic Intensity linear
+
+| Tile-Größe T | Arithmetische Intensität (OP/Byte) |
+|--------------|-----------------------------------|
+| 1 | 0.25 |
+| 2 | 0.5 |
+| 4 | 1.0 |
+| 8 | 2.0 |
+| 16 | 4.0 |
+| 32 | 8.0 |
+
+Vergleiche mit der naiven Version (0.25 OP/Byte): Mit T=32 erreichen wir 8 OP/Byte - eine **32-fache Verbesserung**
+Aber selbst 8 OP/Byte ist noch weit unter den ~60 OP/Byte, die moderne GPUs für Compute-Bound-Betrieb benötigen :(
+
+### Tiling-Optimierung - Überlegungen
+
+**Beschränkungen der Tile-Größe T:**
+
+1. **Maximale Threads pro Block:**
+   - Tile T×T benötigt T² Threads
+   - Bei T=32: 1024 Threads (Maximum auf den meisten GPUs)
+   - Bei T=64: 4096 Threads (zu viel)
+
+2. **Verfügbarer Shared Memory:**
+   - Zwei Tiles: 2 × T² × 4 Bytes
+   - Bei T=32: 2 × 1024 × 4 = 8 KB
+   - Bei T=64: 2 × 4096 × 4 = 32 KB
+   - Maximum pro Block: 48-100 KB (je nach GPU)
+
+3. **Trade-off mit Occupancy:**
+   - Größere Tiles → mehr Shared Memory pro Block
+   - Mehr Shared Memory pro Block → weniger Blocks pro SM
+   - Weniger Blocks pro SM → geringere Occupancy
+   - Geringere Occupancy → weniger Möglichkeiten für Latency Hiding
+
+**Optimale Tile-Größe balanciert:**
+- Erhöhte arithmetic Intensity (größer = besser)
+- Erhaltene Occupancy (kleiner = besser)
+
+Falls Shared Memory zur Laufzeit alloziert werden soll:
+```cpp
+// Im Kernel
+extern __shared__ float A_s[];  // Größe wird extern festgelegt
+
+// Beim Kernel-Aufruf
+int sharedMemSize = 2 * T * T * sizeof(float);
+tiled_matmul<<<gridDim, blockDim, sharedMemSize>>>(A, B, C);
+//                                      ↑
+//                      Dritter Parameter = Shared Memory Größe
+```
+
+### Häufige Optimierungsstrategien
+
+| Optimierung | Vorteile für Rechenleistung | Vorteile für Speicherperformance | Strategien |
+|-------------|----------------------------|----------------------------------|------------|
+| **Occupancy maximieren** | Mehr Arbeit zum Verstecken von Latenz | Mehr parallele Speicherzugriffe verstecken DRAM-Latenz | SM-Ressourcennutzung tunen (Threads pro Block, Register pro Thread, Shared Memory pro Block) |
+| **Tiling und Datenwiederverwendung** | Weniger Warten auf Global Memory | Weniger Global Memory Traffic | Shared Memory nutzen um häufig wiederverwendete Daten zu cachen |
+| **Control Divergence minimieren** | Höhere SIMD-Effizienz | — | Thread-zu-Daten-Mapping oder Algorithmus ändern um Verzweigungsdivergenz zu reduzieren |
+| **Thread Coarsening** | Weniger redundante Arbeit und Synchronisations-Overhead | Weniger redundanter Global Memory Traffic | Mehrere Arbeitseinheiten pro Thread zuweisen für bessere Wiederverwendung |
+| **Coalesced Memory Access** | Weniger Pipeline-Stalls | Bessere Bandbreitennutzung durch Burst-Zugriffe | Datenlayout und Zugriffsmuster so anordnen, dass Threads eines Warps zusammenhängend zugreifen |
+
+### Optimierungs-Faustregel von Chatty 
+**Faustregel:** Optimierungen auf höherer Ebene bringen meist mehr als Micro-Optimierungen. Erst den Algorithmus optimieren, dann die Speicherzugriffe, dann den Rest.
+```
+┌─────────────────────────────────────────────────────────────┐
+│  1. Algorithmus-Ebene                                       │
+│     → Richtigen Algorithmus wählen, Datenwiederverwendung   │
+├─────────────────────────────────────────────────────────────┤
+│  2. Speicherzugriffsmuster                                  │
+│     → Coalescing, Tiling, Shared Memory nutzen              │
+├─────────────────────────────────────────────────────────────┤
+│  3. Ausführungseffizienz                                    │
+│     → Divergenz minimieren, Occupancy tunen                 │
+├─────────────────────────────────────────────────────────────┤
+│  4. Instruktions-Ebene                                      │
+│     → Intrinsics, Loop Unrolling, Compiler-Optionen         │
+└─────────────────────────────────────────────────────────────┘
+```
