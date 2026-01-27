@@ -1696,3 +1696,19 @@ MPI_Scatterv(
 | `MPI_Gather` | `MPI_Gatherv` |
 | `MPI_Allgather` | `MPI_Allgatherv` |
 | `MPI_Alltoall` | `MPI_Alltoallv` |
+
+## Checkliste
+
+Wenn man diese Konstrukte begreift, ist man gut dabei:
+
+| Kategorie | Konstrukte |
+|-----------|------------|
+| **Grundfunktionen** | `MPI_Init`, `MPI_Finalize`, `MPI_Comm_rank`, `MPI_Comm_size` |
+| **Punkt-zu-Punkt** | `MPI_Send`, `MPI_Recv`, Tags, `MPI_ANY_SOURCE`, `MPI_ANY_TAG`, `MPI_Status` |
+| **Kollektive Datenbewegung** | `MPI_Bcast`, `MPI_Scatter`, `MPI_Gather`, `MPI_Allgather`, `MPI_Alltoall` |
+| **Kollektive Berechnung** | `MPI_Reduce`, `MPI_Allreduce`, `MPI_Scan`, `MPI_Exscan`, `MPI_Reduce_scatter` |
+| **Reduktionsoperationen** | `MPI_SUM`, `MPI_PROD`, `MPI_MAX`, `MPI_MIN`, `MPI_LAND`, `MPI_MAXLOC` |
+| **Variable-Count** | `MPI_Scatterv`, `MPI_Gatherv`, `MPI_Allgatherv`, `MPI_Alltoallv` |
+| **Synchronisation** | `MPI_Barrier` |
+| **Kommunikatoren** | `MPI_COMM_WORLD`, eigene Kommunikatoren |
+| **Sonstiges** | `MPI_IN_PLACE`, `MPI_STATUS_IGNORE`, Datentypen (`MPI_INT`, `MPI_DOUBLE`, ...) |

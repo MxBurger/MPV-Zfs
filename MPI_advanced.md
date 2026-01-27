@@ -1561,3 +1561,24 @@ MPI_Sendrecv(
 ```
 
 Es ist keine spezielle Behandlung notwendig. Der gleiche Code funktioniert für alle Prozesse - egal ob sie am Rand sind oder nicht. Das macht den Code viel einfacher.
+
+## Checkliste
+
+Wenn man diese Konstrukte begreift, ist man gut dabei:
+
+| Kategorie | Konstrukte |
+|-----------|------------|
+| **Grundfunktionen** | `MPI_Init`, `MPI_Finalize`, `MPI_Comm_rank`, `MPI_Comm_size` |
+| **Punkt-zu-Punkt (blockierend)** | `MPI_Send`, `MPI_Recv`, `MPI_Ssend`, `MPI_Sendrecv` |
+| **Punkt-zu-Punkt (nicht-blockierend)** | `MPI_Isend`, `MPI_Irecv`, `MPI_Request` |
+| **Warten & Testen** | `MPI_Wait`, `MPI_Waitall`, `MPI_Waitany`, `MPI_Test`, `MPI_Testall` |
+| **Kollektive Datenbewegung** | `MPI_Bcast`, `MPI_Scatter`, `MPI_Gather`, `MPI_Allgather`, `MPI_Alltoall` |
+| **Kollektive Berechnung** | `MPI_Reduce`, `MPI_Allreduce`, `MPI_Scan`, `MPI_Exscan`, `MPI_Reduce_scatter` |
+| **Reduktionsoperationen** | `MPI_SUM`, `MPI_PROD`, `MPI_MAX`, `MPI_MIN`, `MPI_LAND`, `MPI_MAXLOC` |
+| **Variable-Count** | `MPI_Scatterv`, `MPI_Gatherv`, `MPI_Allgatherv`, `MPI_Alltoallv` |
+| **Abgeleitete Datentypen** | `MPI_Type_contiguous`, `MPI_Type_vector`, `MPI_Type_indexed`, `MPI_Type_create_struct`, `MPI_Type_commit`, `MPI_Type_free` |
+| **Kommunikatoren & Gruppen** | `MPI_COMM_WORLD`, `MPI_Comm_split`, `MPI_Comm_create`, `MPI_Comm_dup`, `MPI_Group_excl`, `MPI_COMM_NULL` |
+| **Kartesische Topologien** | `MPI_Cart_create`, `MPI_Cart_shift`, `MPI_Cart_coords`, `MPI_Cart_rank`, `MPI_Cart_sub`, `MPI_Dims_create` |
+| **Synchronisation** | `MPI_Barrier` |
+| **Sonstiges** | `MPI_IN_PLACE`, `MPI_STATUS_IGNORE`, `MPI_ANY_SOURCE`, `MPI_ANY_TAG`, `MPI_PROC_NULL`, Datentypen (`MPI_INT`, `MPI_DOUBLE`, ...) |
+| **Konzepte** | SPMD-Modell, Deadlock-Vermeidung, Halo-Austausch (Ghost Cells), Domain Decomposition, Stencil-Operationen |
