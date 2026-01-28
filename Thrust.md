@@ -403,20 +403,64 @@ std::println("{} {}", out_keys, out_vals);
 Ist eine non-owning View auf existierenden Speicher
 
 ```cpp
-   // linearer Speicher (z. B. aus CUDA, Thrust, malloc, …)
-    std::vector<int> data {
-        1, 2, 3,
-        4, 5, 6
-    };
+#include <mdspan>
+#include <vector>
+#include <print>
 
-    // 2x3-Matrix-View (row-major)
-    std::mdspan<int, std::extents<size_t, 2, 3>> m(data.data());
+int main() {
+    std::vector<int> data {1, 2, 3, 4, 5, 6};
+    
+    // Row-Major (layout_right) - C/C++ Standard
+    std::mdspan<int, std::extents<size_t, 2, 3>, std::layout_right> row(data.data());
+    
+    // Column-Major (layout_left) - Fortran/MATLAB Style
+    std::mdspan<int, std::extents<size_t, 2, 3>, std::layout_left> col(data.data());
+    
+    std::println("Speicher: [1, 2, 3, 4, 5, 6]\n");
+    
+    std::println("Row-Major (layout_right):");
+    std::println("  Zeile 0: {} {} {}", row(0,0), row(0,1), row(0,2));
+    std::println("  Zeile 1: {} {} {}", row(1,0), row(1,1), row(1,2));
+    
+    std::println("\nColumn-Major (layout_left):");
+    std::println("  Zeile 0: {} {} {}", col(0,0), col(0,1), col(0,2));
+    std::println("  Zeile 1: {} {} {}", col(1,0), col(1,1), col(1,2));
+}
+```
 
-    std::println("{}", m(0, 0)); // 1
-    std::println("{}", m(1, 2)); // 6
+### Cuda Version
 
-    // Traversieren wie eine Matrix
-    for (size_t i = 0; i < m.extent(0); ++i)
-        for (size_t j = 0; j < m.extent(1); ++j)
-            std::println("m({}, {}) = {}", i, j, m(i, j));
+```cpp
+float data[] = {1,2,3,4,5,6};
+
+cuda::std::mdspan<
+    float,
+    cuda::std::extents<size_t, 2, 3>,
+    cuda::std::layout_right
+> row(data);
+
+cuda::std::mdspan<
+    float,
+    cuda::std::extents<size_t, 2, 3>,
+    cuda::std::layout_left
+> col(data);
+
+std::printf("Row-Major:\n");
+std::printf("%f %f %f\n", row(0,0), row(0,1), row(0,2));
+std::printf("%f %f %f\n", row(1,0), row(1,1), row(1,2));
+
+std::printf("\nColumn-Major:\n");
+std::printf("%f %f %f\n", col(0,0), col(0,1), col(0,2));
+std::printf("%f %f %f\n", col(1,0), col(1,1), col(1,2));
+
+```
+
+```
+Row-Major:
+1.000000 2.000000 3.000000
+4.000000 5.000000 6.000000
+
+Column-Major:
+1.000000 3.000000 5.000000
+2.000000 4.000000 6.000000
 ```
